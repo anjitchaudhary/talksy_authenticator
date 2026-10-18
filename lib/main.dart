@@ -1,4 +1,5 @@
-import 'dart:math';
+import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
@@ -9,6 +10,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 final supabase = Supabase.instance.client;
+
+const _lightBlue = Color.fromARGB(255, 73, 149, 219);
 
 void replaceWith(BuildContext context, Widget screen) {
   Navigator.pushReplacement(
@@ -32,11 +35,27 @@ Future<Map<String, dynamic>?> fetchProfile() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('first_name', profile['first_name'] ?? '');
     await prefs.setString('last_name', profile['last_name'] ?? '');
+    await prefs.setString('email', profile['email'] ?? user.email ?? '');
     await prefs.setString('avatar_url', profile['avatar_url'] ?? '');
     return profile;
   } catch (_) {
     return null;
   }
+}
+
+Future<void> signOutGoogle() async {
+  try {
+    await GoogleSignIn.instance.signOut();
+  } catch (_) {}
+}
+
+Future<void> clearSession() async {
+  await signOutGoogle();
+  try {
+    await supabase.auth.signOut();
+  } catch (_) {}
+  final prefs = await SharedPreferences.getInstance();
+  await prefs.clear();
 }
 
 Future<void> main() async {
@@ -233,6 +252,7 @@ class _LoginScreenState extends State<LoginScreen> {
   }
 
   Future<void> _handleGoogleSignIn() async {
+    if (_isLoading) return;
     setState(() => _isLoading = true);
 
     try {
@@ -244,7 +264,7 @@ class _LoginScreenState extends State<LoginScreen> {
       );
 
       if (response != true) {
-        await GoogleSignIn.instance.signOut();
+        await signOutGoogle();
         _showError('This email is not registered.');
         return;
       }
@@ -267,7 +287,7 @@ class _LoginScreenState extends State<LoginScreen> {
         _showError('Google sign in failed. Please try again.');
       }
     } catch (_) {
-      await GoogleSignIn.instance.signOut();
+      await signOutGoogle();
       _showError('Sign in failed. Please try again.');
     } finally {
       if (mounted) setState(() => _isLoading = false);
@@ -278,87 +298,133 @@ class _LoginScreenState extends State<LoginScreen> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final colors = theme.colorScheme;
+
     return Scaffold(
+      backgroundColor: colors.surface,
       body: SafeArea(
-        child: Center(
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 24),
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 420),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(Icons.security, size: 76, color: colors.primary),
-                  const SizedBox(height: 28),
-                  Text(
-                    'Welcome to Talksy Authenticator',
-                    textAlign: TextAlign.center,
-                    style: theme.textTheme.headlineSmall?.copyWith(
-                      fontWeight: FontWeight.bold,
-                    ),
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            return SingleChildScrollView(
+              physics: const AlwaysScrollableScrollPhysics(),
+              child: ConstrainedBox(
+                constraints: BoxConstraints(minHeight: constraints.maxHeight),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 28,
+                    vertical: 32,
                   ),
-                  const SizedBox(height: 10),
-                  Text(
-                    'Sign in with your registered particular email which you have used to create your Talksy account.',
-                    textAlign: TextAlign.center,
-                    style: theme.textTheme.bodyLarge?.copyWith(
-                      color: colors.onSurfaceVariant,
-                    ),
-                  ),
-                  const SizedBox(height: 40),
-                  SizedBox(
-                    width: double.infinity,
-                    height: 48,
-                    child: OutlinedButton(
-                      onPressed: _isLoading ? null : _handleGoogleSignIn,
-                      style: OutlinedButton.styleFrom(
-                        backgroundColor: colors.surface,
-                        side: BorderSide(color: colors.outlineVariant),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(14),
-                        ),
-                      ),
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      const SizedBox(height: 12),
+                      Column(
                         children: [
-                          _isLoading
-                              ? SizedBox(
-                                  width: 22,
-                                  height: 22,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2.5,
-                                    color: colors.primary,
-                                  ),
-                                )
-                              : const GoogleLogo(size: 22),
-                          const SizedBox(width: 12),
+                          Container(
+                            padding: const EdgeInsets.all(22),
+                            decoration: BoxDecoration(
+                              color: colors.primaryContainer.withValues(
+                                alpha: 0.35,
+                              ),
+                              shape: BoxShape.circle,
+                            ),
+                            child: Icon(
+                              Icons.security_rounded,
+                              size: 60,
+                              color: colors.primary,
+                            ),
+                          ),
+                          const SizedBox(height: 28),
                           Text(
-                            _isLoading
-                                ? 'Signing in...'
-                                : 'Sign in with Google',
-                            style: theme.textTheme.titleMedium?.copyWith(
-                              color: colors.onSurface,
-                              fontWeight: FontWeight.w600,
+                            'Welcome to Talksy Authenticator',
+                            textAlign: TextAlign.center,
+                            style: theme.textTheme.headlineSmall?.copyWith(
+                              fontWeight: FontWeight.bold,
+                              letterSpacing: -0.5,
+                            ),
+                          ),
+                          const SizedBox(height: 12),
+                          Text(
+                            'Sign in with your registered particular email which you have used to create your Talksy account.',
+                            textAlign: TextAlign.center,
+                            style: theme.textTheme.bodyMedium?.copyWith(
+                              color: colors.onSurfaceVariant,
+                              height: 1.45,
                             ),
                           ),
                         ],
                       ),
-                    ),
+                      const SizedBox(height: 32),
+                      Column(
+                        children: [
+                          SizedBox(
+                            width: double.infinity,
+                            height: 52,
+                            child: OutlinedButton(
+                              onPressed: _isLoading
+                                  ? null
+                                  : _handleGoogleSignIn,
+                              style: OutlinedButton.styleFrom(
+                                backgroundColor: colors.surface,
+                                side: BorderSide(
+                                  color: colors.outlineVariant,
+                                  width: 1.2,
+                                ),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(16),
+                                ),
+                                elevation: 0,
+                              ),
+                              child: Row(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  _isLoading
+                                      ? SizedBox(
+                                          width: 22,
+                                          height: 22,
+                                          child: CircularProgressIndicator(
+                                            strokeWidth: 2.5,
+                                            color: colors.primary,
+                                          ),
+                                        )
+                                      : const GoogleLogo(size: 22),
+                                  const SizedBox(width: 14),
+                                  Text(
+                                    _isLoading
+                                        ? 'Signing in...'
+                                        : 'Sign in with Google',
+                                    style: theme.textTheme.titleMedium
+                                        ?.copyWith(
+                                          color: colors.onSurface,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 20),
+                          Text(
+                            'If you have already created your account with a email address and password, '
+                            'sign in with that same email address to access your code.',
+                            textAlign: TextAlign.center,
+                            style: theme.textTheme.bodySmall?.copyWith(
+                              fontSize: 11.5,
+                              color: colors.onSurfaceVariant.withValues(
+                                alpha: 0.85,
+                              ),
+                              height: 1.4,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 12),
+                    ],
                   ),
-                  const SizedBox(height: 16),
-                  Text(
-                    'If you have already created your account with a email address and password, '
-                    'sign in with that same email address to access your code.',
-                    textAlign: TextAlign.center,
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      fontSize: 11,
-                      color: colors.onSurfaceVariant,
-                    ),
-                  ),
-                ],
+                ),
               ),
-            ),
-          ),
+            );
+          },
         ),
       ),
     );
@@ -404,8 +470,8 @@ class _GoogleLogoPainter extends CustomPainter {
       paint.color = color;
       canvas.drawArc(
         arcBounds,
-        startDegrees * pi / 180,
-        sweepDegrees * pi / 180,
+        startDegrees * math.pi / 180,
+        sweepDegrees * math.pi / 180,
         false,
         paint,
       );
@@ -431,6 +497,8 @@ class _GoogleLogoPainter extends CustomPainter {
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
 
+enum _CodeState { loading, offline, idle, active }
+
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
 
@@ -438,65 +506,196 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
-  String firstName = '';
-  String lastName = '';
-  String email = '';
-  String avatarUrl = '';
-  bool isLoadingData = true;
+class _HomeScreenState extends State<HomeScreen>
+    with WidgetsBindingObserver, SingleTickerProviderStateMixin {
+  static const _lifetime = 60;
+  static const _warnAt = 10;
+  static const _getCodeRpc = 'get_my_code';
+  static const _generateCodeRpc = 'generate_my_code';
+
+  late final AnimationController _clock;
+  Timer? _ticker;
+
+  String _firstName = '';
+  String _lastName = '';
+  String _email = '';
+  String _avatarUrl = '';
+  bool _profileLoading = true;
+
+  _CodeState _state = _CodeState.loading;
+  String _code = '';
+  DateTime _expiresAt = DateTime.now();
+  DateTime _retryAt = DateTime.now();
+  bool _requesting = false;
+  bool _generating = false;
+  bool _loggingOut = false;
+
+  String get _name => '$_firstName $_lastName'.trim();
+
+  int get _secondsLeft {
+    final millis = _expiresAt.difference(DateTime.now()).inMilliseconds;
+    return (millis / 1000).ceil().clamp(0, _lifetime);
+  }
 
   @override
   void initState() {
     super.initState();
-    _loadUserData();
+    WidgetsBinding.instance.addObserver(this);
+    _clock = AnimationController(
+      vsync: this,
+      duration: const Duration(seconds: _lifetime),
+    );
+    _ticker = Timer.periodic(const Duration(seconds: 1), (_) => _onTick());
+    _loadProfile();
+    _requestCode(_getCodeRpc);
   }
 
-  Future<void> _loadUserData() async {
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _ticker?.cancel();
+    _clock.dispose();
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _requestCode(_getCodeRpc);
+    }
+  }
+
+  Future<void> _loadProfile() async {
     final prefs = await SharedPreferences.getInstance();
     if (!mounted) return;
     setState(() {
-      firstName = prefs.getString('first_name') ?? '';
-      lastName = prefs.getString('last_name') ?? '';
-      email = prefs.getString('email') ?? '';
-      avatarUrl = prefs.getString('avatar_url') ?? '';
-      isLoadingData = false;
+      _firstName = prefs.getString('first_name') ?? '';
+      _lastName = prefs.getString('last_name') ?? '';
+      _email =
+          prefs.getString('email') ?? supabase.auth.currentUser?.email ?? '';
+      _avatarUrl = prefs.getString('avatar_url') ?? '';
+      _profileLoading = false;
     });
 
     final profile = await fetchProfile();
     if (!mounted || profile == null) return;
     setState(() {
-      firstName = profile['first_name'] ?? '';
-      lastName = profile['last_name'] ?? '';
-      email = profile['email'] ?? '';
-      avatarUrl = profile['avatar_url'] ?? '';
+      _firstName = profile['first_name'] ?? _firstName;
+      _lastName = profile['last_name'] ?? _lastName;
+      _email = profile['email'] ?? _email;
+      _avatarUrl = profile['avatar_url'] ?? _avatarUrl;
     });
   }
 
-  Future<void> _handleLogout() async {
-    final shouldLogout = await showDialog<bool>(
+  void _onTick() {
+    if (!mounted) return;
+
+    if (_state == _CodeState.active) {
+      if (_secondsLeft == 0) {
+        _showIdle();
+      } else {
+        setState(() {});
+      }
+    } else if (_state == _CodeState.offline &&
+        DateTime.now().isAfter(_retryAt)) {
+      _requestCode(_getCodeRpc);
+    }
+  }
+
+  void _showIdle() {
+    _clock.reset();
+    setState(() {
+      _code = '';
+      _state = _CodeState.idle;
+    });
+  }
+
+  void _showOffline() {
+    _clock.reset();
+    _retryAt = DateTime.now().add(const Duration(seconds: 5));
+    setState(() {
+      _code = '';
+      _state = _CodeState.offline;
+    });
+  }
+
+  void _showCode(String code, double secondsLeft) {
+    final clampedSeconds = secondsLeft.clamp(1.0, _lifetime.toDouble());
+    setState(() {
+      _code = code;
+      _expiresAt = DateTime.now().add(
+        Duration(milliseconds: (clampedSeconds * 1000).round()),
+      );
+      _state = _CodeState.active;
+    });
+    _clock.duration = Duration(seconds: clampedSeconds.round());
+    _clock.forward(from: 0.0);
+  }
+
+  Future<void> _requestCode(String function) async {
+    if (_requesting || _loggingOut) return;
+    _requesting = true;
+
+    try {
+      final rows =
+          await supabase.rpc(function).timeout(const Duration(seconds: 8))
+              as List;
+      if (!mounted || _loggingOut) return;
+
+      if (rows.isEmpty) {
+        _showIdle();
+        return;
+      }
+
+      final row = rows.first as Map<String, dynamic>;
+      _showCode(row['code'] as String, (row['seconds_left'] as num).toDouble());
+    } catch (_) {
+      if (mounted && !_loggingOut) _showOffline();
+    } finally {
+      _requesting = false;
+    }
+  }
+
+  Future<void> _generateCode() async {
+    if (_generating) return;
+    setState(() => _generating = true);
+    try {
+      await _requestCode(_generateCodeRpc);
+    } finally {
+      if (mounted) setState(() => _generating = false);
+    }
+  }
+
+  Future<bool?> _confirmLogout() {
+    return showCupertinoDialog<bool>(
       context: context,
-      builder: (context) => AlertDialog(
+      builder: (dialogContext) => CupertinoAlertDialog(
         title: const Text('Log out'),
         content: const Text('Are you sure you want to log out?'),
         actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
+          CupertinoDialogAction(
+            onPressed: () => Navigator.pop(dialogContext, false),
             child: const Text('Cancel'),
           ),
-          TextButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('Yes'),
+          CupertinoDialogAction(
+            isDestructiveAction: true,
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Log out'),
           ),
         ],
       ),
     );
+  }
 
-    if (shouldLogout != true) return;
+  Future<void> _logout() async {
+    if (_loggingOut) return;
+    final confirmed = await _confirmLogout();
+    if (confirmed != true || !mounted) return;
 
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.clear();
-    await GoogleSignIn.instance.signOut();
-    await supabase.auth.signOut();
+    _ticker?.cancel();
+    setState(() => _loggingOut = true);
+
+    await clearSession();
 
     if (!mounted) return;
     replaceWith(context, const LoginScreen());
@@ -505,168 +704,339 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    return Scaffold(
-      backgroundColor: theme.scaffoldBackgroundColor,
-      appBar: AppBar(
-        toolbarHeight: 40,
-        backgroundColor: theme.scaffoldBackgroundColor,
-        elevation: 0,
-        centerTitle: false,
-        title: const Text(
-          'Talksy Authenticator',
-          style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
-        ),
-        actions: [
-          Center(
-            child: Padding(
-              padding: const EdgeInsets.only(right: 16.0),
-              child: Container(
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  border: Border.all(
-                    color: theme.dividerColor.withValues(alpha: 0.3),
-                    width: 0.3,
+    final colors = theme.colorScheme;
+
+    return PopScope(
+      canPop: !_loggingOut,
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          Scaffold(
+            appBar: AppBar(
+              toolbarHeight: 44,
+              elevation: 0,
+              scrolledUnderElevation: 0,
+              centerTitle: false,
+              backgroundColor: theme.scaffoldBackgroundColor,
+              surfaceTintColor: Colors.transparent,
+              title: const Text(
+                'Talksy Authenticator',
+                style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+              ),
+              actions: [
+                Padding(
+                  padding: const EdgeInsets.only(right: 12),
+                  child: IconButton.filledTonal(
+                    tooltip: 'Log out',
+                    onPressed: _logout,
+                    style: IconButton.styleFrom(
+                      backgroundColor: colors.errorContainer.withValues(
+                        alpha: 0.6,
+                      ),
+                      foregroundColor: colors.onErrorContainer,
+                      fixedSize: const Size(36, 36),
+                    ),
+                    icon: const Icon(Icons.logout_rounded, size: 18),
                   ),
                 ),
-                child: IconButton(
-                  onPressed: _handleLogout,
-                  icon: const Icon(Icons.logout, size: 15),
-                  constraints: const BoxConstraints.tightFor(
-                    width: 15,
-                    height: 15,
+              ],
+            ),
+            body: SafeArea(
+              child: SingleChildScrollView(
+                physics: const BouncingScrollPhysics(),
+                padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+                child: Align(
+                  alignment: Alignment.topCenter,
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 500),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        _card(
+                          theme,
+                          _profileLoading
+                              ? _profileSkeleton(theme)
+                              : _profile(theme),
+                        ),
+                        const SizedBox(height: 24),
+                        const Padding(
+                          padding: EdgeInsets.only(left: 4),
+                          child: Text(
+                            'Code',
+                            style: TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        _card(theme, _codeContent(theme)),
+                        const SizedBox(height: 10),
+                        SizedBox(
+                          width: double.infinity,
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 6),
+                            child: Text(
+                              'This code will only be valid for 60 seconds and can be used for both login and password recovery.',
+                              textAlign: TextAlign.justify,
+                              style: TextStyle(
+                                fontSize: 12,
+                                height: 1.35,
+                                color: theme.hintColor,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
-                  padding: EdgeInsets.zero,
-                  splashRadius: 10,
                 ),
               ),
             ),
           ),
+          if (_loggingOut) _logoutOverlay(theme),
         ],
       ),
-      body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(16.0, 8.0, 16.0, 16.0),
-          child: Align(
-            alignment: Alignment.topCenter,
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 500),
-              child: Card(
-                elevation: 0,
-                color: theme.cardColor,
-                margin: EdgeInsets.zero,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(12),
-                  side: BorderSide(
-                    color: theme.dividerColor.withValues(alpha: 0.25),
-                    width: 0.5,
-                  ),
-                ),
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 14.0,
-                    vertical: 10.0,
-                  ),
-                  child: isLoadingData
-                      ? Row(
-                          children: [
-                            Container(
-                              width: 40,
-                              height: 40,
-                              decoration: BoxDecoration(
-                                shape: BoxShape.circle,
-                                color: theme.dividerColor.withValues(
-                                  alpha: 0.15,
-                                ),
-                              ),
-                            ),
-                            const SizedBox(width: 12),
-                            Expanded(
-                              child: Column(
-                                mainAxisSize: MainAxisSize.min,
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Container(
-                                    width: 120,
-                                    height: 14,
-                                    decoration: BoxDecoration(
-                                      borderRadius: BorderRadius.circular(4),
-                                      color: theme.dividerColor.withValues(
-                                        alpha: 0.15,
-                                      ),
-                                    ),
-                                  ),
-                                  const SizedBox(height: 6),
-                                  Container(
-                                    width: 180,
-                                    height: 11,
-                                    decoration: BoxDecoration(
-                                      borderRadius: BorderRadius.circular(4),
-                                      color: theme.dividerColor.withValues(
-                                        alpha: 0.15,
-                                      ),
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ],
-                        )
-                      : Row(
-                          children: [
-                            CircleAvatar(
-                              radius: 20,
-                              backgroundColor:
-                                  theme.colorScheme.primaryContainer,
-                              backgroundImage: avatarUrl.isNotEmpty
-                                  ? NetworkImage(avatarUrl)
-                                  : null,
-                              child: avatarUrl.isEmpty
-                                  ? Icon(
-                                      Icons.person,
-                                      size: 22,
-                                      color:
-                                          theme.colorScheme.onPrimaryContainer,
-                                    )
-                                  : null,
-                            ),
-                            const SizedBox(width: 12),
-                            Expanded(
-                              child: Column(
-                                mainAxisSize: MainAxisSize.min,
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(
-                                    '$firstName $lastName'.trim().isEmpty
-                                        ? 'Talksy User'
-                                        : '$firstName $lastName',
-                                    style: const TextStyle(
-                                      fontSize: 15,
-                                      fontWeight: FontWeight.w600,
-                                    ),
-                                    overflow: TextOverflow.ellipsis,
-                                  ),
-                                  const SizedBox(height: 2),
-                                  Text(
-                                    email.isEmpty ? 'No email provided' : email,
-                                    style: TextStyle(
-                                      color:
-                                          theme.textTheme.bodySmall?.color ??
-                                          Colors.grey.shade50,
-                                      fontSize: 12.5,
-                                    ),
-                                    overflow: TextOverflow.ellipsis,
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ],
-                        ),
-                ),
-              ),
-            ),
+    );
+  }
+
+  Widget _logoutOverlay(ThemeData theme) {
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        ModalBarrier(
+          dismissible: false,
+          color: theme.scaffoldBackgroundColor.withValues(alpha: 0.85),
+        ),
+        Center(
+          child: CupertinoActivityIndicator(
+            radius: 16,
+            color: theme.colorScheme.onSurfaceVariant,
           ),
+        ),
+      ],
+    );
+  }
+
+  Widget _card(ThemeData theme, Widget child) {
+    return SizedBox(
+      width: double.infinity,
+      child: Card(
+        elevation: 0,
+        margin: EdgeInsets.zero,
+        color: theme.cardColor,
+        surfaceTintColor: Colors.transparent,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(14),
+          side: BorderSide(
+            color: theme.dividerColor.withValues(alpha: 0.25),
+            width: 0.5,
+          ),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+          child: child,
         ),
       ),
     );
   }
+
+  Widget _profile(ThemeData theme) {
+    final hasAvatar = _avatarUrl.isNotEmpty;
+
+    return Row(
+      children: [
+        CircleAvatar(
+          radius: 20,
+          backgroundColor: theme.colorScheme.primaryContainer,
+          backgroundImage: hasAvatar ? NetworkImage(_avatarUrl) : null,
+          onBackgroundImageError: hasAvatar ? (_, _) {} : null,
+          child: hasAvatar
+              ? null
+              : Icon(
+                  CupertinoIcons.person_fill,
+                  size: 20,
+                  color: theme.colorScheme.onPrimaryContainer,
+                ),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                _name.isEmpty ? 'Talksy User' : _name,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontSize: 15,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                _email.isEmpty ? 'No email provided' : _email,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 12.5,
+                  color: theme.textTheme.bodySmall?.color,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _profileSkeleton(ThemeData theme) {
+    final color = theme.dividerColor.withValues(alpha: 0.15);
+
+    Widget bar(double width, double height) {
+      return Container(
+        width: width,
+        height: height,
+        decoration: BoxDecoration(
+          color: color,
+          borderRadius: BorderRadius.circular(4),
+        ),
+      );
+    }
+
+    return Row(
+      children: [
+        Container(
+          width: 40,
+          height: 40,
+          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+        ),
+        const SizedBox(width: 12),
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [bar(120, 14), const SizedBox(height: 6), bar(180, 11)],
+        ),
+      ],
+    );
+  }
+
+  Widget _codeContent(ThemeData theme) {
+    switch (_state) {
+      case _CodeState.loading:
+        return Container(
+          height: 46,
+          decoration: BoxDecoration(
+            color: theme.dividerColor.withValues(alpha: 0.15),
+            borderRadius: BorderRadius.circular(10),
+          ),
+        );
+      case _CodeState.offline:
+        return SizedBox(
+          height: 46,
+          child: Row(
+            children: [
+              Icon(CupertinoIcons.wifi_slash, size: 18, color: theme.hintColor),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  'Connect to internet to see code',
+                  style: TextStyle(fontSize: 14, color: theme.hintColor),
+                ),
+              ),
+            ],
+          ),
+        );
+      case _CodeState.idle:
+        return _generateButton();
+      case _CodeState.active:
+        return _activeCode(theme);
+    }
+  }
+
+  Widget _generateButton() {
+    return SizedBox(
+      width: double.infinity,
+      height: 46,
+      child: FilledButton(
+        onPressed: _generating ? null : _generateCode,
+        style: FilledButton.styleFrom(
+          backgroundColor: _lightBlue,
+          foregroundColor: Colors.white,
+          disabledBackgroundColor: _lightBlue.withValues(alpha: 0.7),
+          disabledForegroundColor: Colors.white70,
+          elevation: 0,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+          ),
+          textStyle: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+        ),
+        child: _generating
+            ? const CupertinoActivityIndicator(color: Colors.white)
+            : const Text('Generate code'),
+      ),
+    );
+  }
+
+  Widget _activeCode(ThemeData theme) {
+    final expiring = _secondsLeft <= _warnAt;
+    final text = _code.length == 6
+        ? '${_code.substring(0, 3)} ${_code.substring(3)}'
+        : _code;
+
+    return SizedBox(
+      height: 46,
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              text,
+              style: TextStyle(
+                fontSize: 30,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 4,
+                color: expiring
+                    ? theme.colorScheme.error
+                    : theme.colorScheme.onSurface,
+                fontFeatures: const [FontFeature.tabularFigures()],
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          SizedBox(
+            width: 24,
+            height: 24,
+            child: CustomPaint(painter: _ClockPainter(_clock)),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ClockPainter extends CustomPainter {
+  _ClockPainter(this.progress) : super(repaint: progress);
+
+  final Animation<double> progress;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = size.center(Offset.zero);
+    final radius = size.width / 2 - 1;
+
+    final fill = Paint()..color = _lightBlue;
+    final border = Paint()
+      ..color = _lightBlue
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.6;
+
+    canvas.drawArc(
+      Rect.fromCircle(center: center, radius: radius),
+      -math.pi / 2,
+      progress.value * 2 * math.pi,
+      true,
+      fill,
+    );
+    canvas.drawCircle(center, radius, border);
+  }
+
+  @override
+  bool shouldRepaint(_ClockPainter oldDelegate) => false;
 }

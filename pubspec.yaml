@@ -9,6 +9,7 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  cupertino_icons: ^2.0.0
   flutter_dotenv: ^6.0.1
   supabase_flutter: ^2.17.2
   google_sign_in: ^7.2.0
