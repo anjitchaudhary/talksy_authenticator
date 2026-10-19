@@ -60,16 +60,32 @@ Future<void> clearSession() async {
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
-  await dotenv.load(fileName: '.env');
-  await Supabase.initialize(
-    url: dotenv.env['SUPABASE_URL']!,
-    publishableKey: dotenv.env['SUPABASE_PUBLISHABLE_KEY']!,
-  );
-  await GoogleSignIn.instance.initialize(
-    serverClientId: dotenv.env['GOOGLE_WEB_CLIENT_ID'],
-  );
-  runApp(const MainApp());
+  try {
+    await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    await dotenv.load(fileName: '.env');
+    await Supabase.initialize(
+      url: dotenv.env['SUPABASE_URL']!,
+      publishableKey: dotenv.env['SUPABASE_PUBLISHABLE_KEY']!,
+    );
+    await GoogleSignIn.instance.initialize(
+      serverClientId: dotenv.env['GOOGLE_WEB_CLIENT_ID'],
+    );
+    runApp(const MainApp());
+  } catch (e, st) {
+    debugPrint('Startup error: $e\n$st');
+    runApp(
+      MaterialApp(
+        home: Scaffold(
+          body: Center(
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: Text('Startup error:\n$e'),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 SystemUiOverlayStyle overlayStyleFor(Brightness brightness) {
@@ -163,12 +179,17 @@ class _SplashScreenState extends State<SplashScreen>
 
   Future<void> _checkSession() async {
     await Future.delayed(const Duration(milliseconds: 1500));
-    final session = supabase.auth.currentSession;
-    if (!mounted) return;
-    replaceWith(
-      context,
-      session != null ? const HomeScreen() : const LoginScreen(),
-    );
+    try {
+      final session = supabase.auth.currentSession;
+      if (!mounted) return;
+      replaceWith(
+        context,
+        session != null ? const HomeScreen() : const LoginScreen(),
+      );
+    } catch (_) {
+      if (!mounted) return;
+      replaceWith(context, const LoginScreen());
+    }
   }
 
   @override
@@ -260,7 +281,7 @@ class _LoginScreenState extends State<LoginScreen> {
 
       final response = await supabase.rpc(
         'check_email_exists',
-        params: {'email_input': googleUser.email},
+        params: {'email_input': googleUser.email.trim().toLowerCase()},
       );
 
       if (response != true) {
@@ -560,9 +581,9 @@ class _HomeScreenState extends State<HomeScreen>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) {
-      _requestCode(_getCodeRpc);
-    }
+    if (state != AppLifecycleState.resumed) return;
+    if (_hasValidCode) _syncClock();
+    _requestCode(_getCodeRpc);
   }
 
   Future<void> _loadProfile() async {
@@ -619,24 +640,37 @@ class _HomeScreenState extends State<HomeScreen>
     });
   }
 
-  void _showCode(String code, double secondsLeft) {
-    final clampedSeconds = secondsLeft.clamp(1.0, _lifetime.toDouble());
+  void _showCode(String code, double secondsLeft, DateTime requestedAt) {
+    final remaining = secondsLeft.clamp(0.0, _lifetime.toDouble());
+    if (remaining == 0) {
+      _showIdle();
+      return;
+    }
     setState(() {
       _code = code;
-      _expiresAt = DateTime.now().add(
-        Duration(milliseconds: (clampedSeconds * 1000).round()),
+      _expiresAt = requestedAt.add(
+        Duration(milliseconds: (remaining * 1000).round()),
       );
       _state = _CodeState.active;
     });
-    _clock.duration = Duration(seconds: clampedSeconds.round());
-    _clock.forward(from: 0.0);
+    _syncClock();
   }
+
+  void _syncClock() {
+    final millisLeft = _expiresAt.difference(DateTime.now()).inMilliseconds;
+    final elapsed = (_lifetime * 1000 - millisLeft) / (_lifetime * 1000);
+    _clock.forward(from: elapsed.clamp(0.0, 1.0));
+  }
+
+  bool get _hasValidCode =>
+      _state == _CodeState.active && _expiresAt.isAfter(DateTime.now());
 
   Future<void> _requestCode(String function) async {
     if (_requesting || _loggingOut) return;
     _requesting = true;
 
     try {
+      final requestedAt = DateTime.now();
       final rows =
           await supabase.rpc(function).timeout(const Duration(seconds: 8))
               as List;
@@ -648,9 +682,19 @@ class _HomeScreenState extends State<HomeScreen>
       }
 
       final row = rows.first as Map<String, dynamic>;
-      _showCode(row['code'] as String, (row['seconds_left'] as num).toDouble());
+      _showCode(
+        row['code'] as String,
+        (row['seconds_left'] as num).toDouble(),
+        requestedAt,
+      );
     } catch (_) {
-      if (mounted && !_loggingOut) _showOffline();
+      if (mounted && !_loggingOut) {
+        if (_hasValidCode) {
+          _syncClock();
+        } else {
+          _showOffline();
+        }
+      }
     } finally {
       _requesting = false;
     }
@@ -777,7 +821,7 @@ class _HomeScreenState extends State<HomeScreen>
                           child: Padding(
                             padding: const EdgeInsets.symmetric(horizontal: 6),
                             child: Text(
-                              'This code will only be valid for 60 seconds and can be used for both login and password recovery.',
+                              'This code will only be valid for 60 seconds and can be used for login. If you are unable to use the code within this time frame, you can generate a new one.',
                               textAlign: TextAlign.justify,
                               style: TextStyle(
                                 fontSize: 12,
