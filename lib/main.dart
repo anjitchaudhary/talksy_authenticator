@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -9,24 +10,27 @@ import 'package:google_sign_in/google_sign_in.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
-final supabase = Supabase.instance.client;
+const _brandColor = Color(0xFF4995DB);
 
-const _lightBlue = Color.fromARGB(255, 73, 149, 219);
-
-void replaceWith(BuildContext context, Widget screen) {
-  Navigator.pushReplacement(
-    context,
-    CupertinoPageRoute(builder: (_) => screen),
-  );
-}
-
-class UserProfile {
-  const UserProfile({
-    required this.firstName,
-    required this.lastName,
-    required this.email,
-    required this.avatarUrl,
+class Profile {
+  const Profile({
+    this.firstName = '',
+    this.lastName = '',
+    this.email = '',
+    this.avatarUrl = '',
   });
+
+  factory Profile.fromMap(
+    Map<String, dynamic> map, {
+    String fallbackEmail = '',
+  }) {
+    return Profile(
+      firstName: map['first_name'] as String? ?? '',
+      lastName: map['last_name'] as String? ?? '',
+      email: map['email'] as String? ?? fallbackEmail,
+      avatarUrl: map['avatar_url'] as String? ?? '',
+    );
+  }
 
   final String firstName;
   final String lastName;
@@ -36,104 +40,154 @@ class UserProfile {
   String get fullName => '$firstName $lastName'.trim();
 }
 
+class CodeSnapshot {
+  const CodeSnapshot({required this.code, required this.secondsLeft});
+
+  final String code;
+  final double secondsLeft;
+}
+
 class ApiGateway {
   ApiGateway._();
+
   static final ApiGateway instance = ApiGateway._();
 
-  static const String _kFirstName = 'cache_first_name';
-  static const String _kLastName = 'cache_last_name';
-  static const String _kEmail = 'cache_email';
-  static const String _kAvatarUrl = 'cache_avatar_url';
+  static const _timeout = Duration(seconds: 8);
 
-  static const String _getCodeRpc = 'get_my_code';
-  static const String _generateCodeRpc = 'generate_my_code';
+  SupabaseClient get _client => Supabase.instance.client;
 
-  Future<UserProfile> getCachedProfile() async {
-    final prefs = await SharedPreferences.getInstance();
-    return UserProfile(
-      firstName: prefs.getString(_kFirstName) ?? '',
-      lastName: prefs.getString(_kLastName) ?? '',
-      email: prefs.getString(_kEmail) ?? supabase.auth.currentUser?.email ?? '',
-      avatarUrl: prefs.getString(_kAvatarUrl) ?? '',
+  bool get hasSession => _client.auth.currentSession != null;
+
+  Stream<bool> get sessionChanges => _client.auth.onAuthStateChange
+      .map((state) => state.session != null)
+      .distinct();
+
+  Future<bool> isEmailRegistered(String email) async {
+    final result = await _client.rpc(
+      'check_email_exists',
+      params: {'email_input': email.trim().toLowerCase()},
+    );
+    return result == true;
+  }
+
+  Future<void> signInWithGoogle(String idToken) async {
+    await _client.auth.signInWithIdToken(
+      provider: OAuthProvider.google,
+      idToken: idToken,
     );
   }
 
-  Future<UserProfile> fetchAndCacheProfile() async {
-    final user = supabase.auth.currentUser;
-    if (user == null) return await getCachedProfile();
-
+  Future<void> signOut() async {
     try {
-      final profile = await supabase
-          .from('profiles')
-          .select()
-          .eq('id', user.id)
-          .maybeSingle();
-
-      if (profile == null) return await getCachedProfile();
-
-      final firstName = profile['first_name'] ?? '';
-      final lastName = profile['last_name'] ?? '';
-      final email = profile['email'] ?? user.email ?? '';
-      final avatarUrl = profile['avatar_url'] ?? '';
-
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString(_kFirstName, firstName);
-      await prefs.setString(_kLastName, lastName);
-      await prefs.setString(_kEmail, email);
-      await prefs.setString(_kAvatarUrl, avatarUrl);
-
-      return UserProfile(
-        firstName: firstName,
-        lastName: lastName,
-        email: email,
-        avatarUrl: avatarUrl,
-      );
-    } catch (_) {
-      return await getCachedProfile();
-    }
+      await _client.auth.signOut();
+    } catch (_) {}
   }
 
-  Future<Map<String, dynamic>?> requestRpcCode(String functionName) async {
+  Future<Profile?> fetchProfile() async {
+    final user = _client.auth.currentUser;
+    if (user == null) return null;
+
     try {
-      final rows =
-          await supabase.rpc(functionName).timeout(const Duration(seconds: 8))
-              as List;
-      if (rows.isEmpty) return null;
-      return rows.first as Map<String, dynamic>;
+      final row = await _client
+          .from('profiles')
+          .select('first_name, last_name, email, avatar_url')
+          .eq('id', user.id)
+          .maybeSingle()
+          .timeout(_timeout);
+      if (row == null) return null;
+      return Profile.fromMap(row, fallbackEmail: user.email ?? '');
     } catch (_) {
       return null;
     }
   }
 
-  Future<Map<String, dynamic>?> getMyCode() => requestRpcCode(_getCodeRpc);
+  Future<CodeSnapshot?> currentCode() => _fetchCode('get_my_code');
 
-  Future<Map<String, dynamic>?> generateMyCode() =>
-      requestRpcCode(_generateCodeRpc);
+  Future<CodeSnapshot?> generateCode() => _fetchCode('generate_my_code');
 
-  Future<void> clearCacheAndSession() async {
-    try {
-      await GoogleSignIn.instance.signOut();
-    } catch (_) {}
-    try {
-      await supabase.auth.signOut();
-    } catch (_) {}
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.clear();
+  Future<CodeSnapshot?> _fetchCode(String function) async {
+    final rows = await _client.rpc(function).timeout(_timeout) as List;
+    if (rows.isEmpty) return null;
+
+    final row = rows.first as Map<String, dynamic>;
+    return CodeSnapshot(
+      code: row['code'] as String,
+      secondsLeft: (row['seconds_left'] as num).toDouble(),
+    );
   }
+}
+
+class ProfileStore {
+  static late SharedPreferences _prefs;
+
+  static Future<void> init() async {
+    _prefs = await SharedPreferences.getInstance();
+  }
+
+  static Profile read() {
+    return Profile(
+      firstName: _prefs.getString('first_name') ?? '',
+      lastName: _prefs.getString('last_name') ?? '',
+      email: _prefs.getString('email') ?? '',
+      avatarUrl: _prefs.getString('avatar_url') ?? '',
+    );
+  }
+
+  static Future<void> write(Profile profile) async {
+    await Future.wait([
+      _prefs.setString('first_name', profile.firstName),
+      _prefs.setString('last_name', profile.lastName),
+      _prefs.setString('email', profile.email),
+      _prefs.setString('avatar_url', profile.avatarUrl),
+    ]);
+  }
+
+  static Future<void> clear() => _prefs.clear();
+}
+
+Future<Profile?> syncProfile() async {
+  final profile = await ApiGateway.instance.fetchProfile();
+  if (profile != null) await ProfileStore.write(profile);
+  return profile;
+}
+
+Future<void> signOutGoogle() async {
+  try {
+    await GoogleSignIn.instance.signOut();
+  } catch (_) {}
+}
+
+Future<void> clearSession() async {
+  final avatarUrl = ProfileStore.read().avatarUrl;
+  await Future.wait([signOutGoogle(), ApiGateway.instance.signOut()]);
+  if (avatarUrl.isNotEmpty) {
+    await CachedNetworkImage.evictFromCache(avatarUrl);
+  }
+  await ProfileStore.clear();
+}
+
+void replaceWith(BuildContext context, Widget screen) {
+  Navigator.pushReplacement(
+    context,
+    CupertinoPageRoute(builder: (_) => screen),
+  );
 }
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   try {
-    await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     await dotenv.load(fileName: '.env');
-    await Supabase.initialize(
-      url: dotenv.env['SUPABASE_URL']!,
-      publishableKey: dotenv.env['SUPABASE_PUBLISHABLE_KEY']!,
-    );
-    await GoogleSignIn.instance.initialize(
-      serverClientId: dotenv.env['GOOGLE_WEB_CLIENT_ID'],
-    );
+    await Future.wait([
+      SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge),
+      ProfileStore.init(),
+      Supabase.initialize(
+        url: dotenv.env['SUPABASE_URL']!,
+        publishableKey: dotenv.env['SUPABASE_PUBLISHABLE_KEY']!,
+      ),
+      GoogleSignIn.instance.initialize(
+        serverClientId: dotenv.env['GOOGLE_WEB_CLIENT_ID'],
+      ),
+    ]);
     runApp(const MainApp());
   } catch (e, st) {
     debugPrint('Startup error: $e\n$st');
@@ -168,11 +222,11 @@ SystemUiOverlayStyle overlayStyleFor(Brightness brightness) {
 
 ThemeData buildTheme(Brightness brightness) {
   return ThemeData(
+    useMaterial3: true,
     colorScheme: ColorScheme.fromSeed(
-      seedColor: Colors.deepPurple,
+      seedColor: _brandColor,
       brightness: brightness,
     ),
-    useMaterial3: true,
     appBarTheme: AppBarTheme(systemOverlayStyle: overlayStyleFor(brightness)),
     pageTransitionsTheme: const PageTransitionsTheme(
       builders: {
@@ -200,117 +254,9 @@ class MainApp extends StatelessWidget {
           child: child!,
         );
       },
-      home: const SplashScreen(),
-    );
-  }
-}
-
-class SplashScreen extends StatefulWidget {
-  const SplashScreen({super.key});
-
-  @override
-  State<SplashScreen> createState() => _SplashScreenState();
-}
-
-class _SplashScreenState extends State<SplashScreen>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _controller = AnimationController(
-    vsync: this,
-    duration: const Duration(milliseconds: 1600),
-  )..repeat(reverse: true);
-
-  late final Animation<double> _scaleAnimation = Tween<double>(
-    begin: 0.92,
-    end: 1.0,
-  ).animate(CurvedAnimation(parent: _controller, curve: Curves.easeInOutCubic));
-
-  late final Animation<double> _fadeAnimation = Tween<double>(
-    begin: 0.75,
-    end: 1.0,
-  ).animate(CurvedAnimation(parent: _controller, curve: Curves.easeInOutCubic));
-
-  @override
-  void initState() {
-    super.initState();
-    _checkSession();
-  }
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  Future<void> _checkSession() async {
-    await Future.delayed(const Duration(milliseconds: 1200));
-    try {
-      final session = supabase.auth.currentSession;
-      if (!mounted) return;
-      replaceWith(
-        context,
-        session != null ? const HomeScreen() : const LoginScreen(),
-      );
-    } catch (_) {
-      if (!mounted) return;
-      replaceWith(context, const LoginScreen());
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final colors = theme.colorScheme;
-    return Scaffold(
-      body: SafeArea(
-        child: Center(
-          child: Padding(
-            padding: const EdgeInsets.all(24),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                FadeTransition(
-                  opacity: _fadeAnimation,
-                  child: ScaleTransition(
-                    scale: _scaleAnimation,
-                    child: Container(
-                      width: 104,
-                      height: 104,
-                      decoration: BoxDecoration(
-                        color: colors.primaryContainer,
-                        shape: BoxShape.circle,
-                      ),
-                      child: Icon(
-                        Icons.lock_outline,
-                        size: 52,
-                        color: colors.onPrimaryContainer,
-                      ),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 28),
-                Text(
-                  'Talksy Authenticator',
-                  style: theme.textTheme.headlineSmall?.copyWith(
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                const SizedBox(height: 28),
-                SizedBox(
-                  width: 120,
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(4),
-                    child: LinearProgressIndicator(
-                      minHeight: 4,
-                      color: colors.primary,
-                      backgroundColor: colors.primaryContainer,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
+      home: ApiGateway.instance.hasSession
+          ? const HomeScreen()
+          : const LoginScreen(),
     );
   }
 }
@@ -323,49 +269,43 @@ class LoginScreen extends StatefulWidget {
 }
 
 class _LoginScreenState extends State<LoginScreen> {
-  bool _isLoading = false;
+  final _gateway = ApiGateway.instance;
+  bool _busy = false;
 
   void _showError(String message) {
     if (!mounted) return;
+    final colors = Theme.of(context).colorScheme;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text(message),
-        backgroundColor: Theme.of(context).colorScheme.error,
+        content: Text(message, style: TextStyle(color: colors.onError)),
+        backgroundColor: colors.error,
         behavior: SnackBarBehavior.floating,
       ),
     );
   }
 
-  Future<void> _handleGoogleSignIn() async {
-    if (_isLoading) return;
-    setState(() => _isLoading = true);
+  Future<void> _signIn() async {
+    if (_busy) return;
+    setState(() => _busy = true);
 
     try {
-      final googleUser = await GoogleSignIn.instance.authenticate();
+      final account = await GoogleSignIn.instance.authenticate();
 
-      final response = await supabase.rpc(
-        'check_email_exists',
-        params: {'email_input': googleUser.email.trim().toLowerCase()},
-      );
-
-      if (response != true) {
-        try {
-          await GoogleSignIn.instance.signOut();
-        } catch (_) {}
-        _showError('This email is not registered.');
+      if (!await _gateway.isEmailRegistered(account.email)) {
+        await signOutGoogle();
+        _showError('This email is not registered with Talksy.');
         return;
       }
 
-      final idToken = googleUser.authentication.idToken;
+      final idToken = account.authentication.idToken;
       if (idToken == null) {
-        throw const AuthException('Missing Google ID token');
+        await signOutGoogle();
+        _showError('Google did not return a valid token. Please try again.');
+        return;
       }
 
-      await supabase.auth.signInWithIdToken(
-        provider: OAuthProvider.google,
-        idToken: idToken,
-      );
-      await ApiGateway.instance.fetchAndCacheProfile();
+      await _gateway.signInWithGoogle(idToken);
+      await syncProfile();
 
       if (!mounted) return;
       replaceWith(context, const HomeScreen());
@@ -374,12 +314,10 @@ class _LoginScreenState extends State<LoginScreen> {
         _showError('Google sign in failed. Please try again.');
       }
     } catch (_) {
-      try {
-        await GoogleSignIn.instance.signOut();
-      } catch (_) {}
-      _showError('Sign in failed. Please try again.');
+      await clearSession();
+      _showError('Sign in failed. Check your connection and try again.');
     } finally {
-      if (mounted) setState(() => _isLoading = false);
+      if (mounted) setState(() => _busy = false);
     }
   }
 
@@ -389,131 +327,91 @@ class _LoginScreenState extends State<LoginScreen> {
     final colors = theme.colorScheme;
 
     return Scaffold(
-      backgroundColor: colors.surface,
       body: SafeArea(
-        child: LayoutBuilder(
-          builder: (context, constraints) {
-            return SingleChildScrollView(
-              physics: const AlwaysScrollableScrollPhysics(),
-              child: ConstrainedBox(
-                constraints: BoxConstraints(minHeight: constraints.maxHeight),
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 28,
-                    vertical: 32,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 28),
+          child: Column(
+            children: [
+              const Spacer(flex: 3),
+              Container(
+                width: 72,
+                height: 72,
+                decoration: BoxDecoration(
+                  color: colors.primaryContainer,
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Icon(
+                  Icons.lock_outline_rounded,
+                  size: 36,
+                  color: colors.onPrimaryContainer,
+                ),
+              ),
+              const SizedBox(height: 28),
+              Text(
+                'Talksy Authenticator',
+                textAlign: TextAlign.center,
+                style: theme.textTheme.headlineSmall?.copyWith(
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(height: 10),
+              Text(
+                'Sign in with the email you used to create your Talksy account.',
+                textAlign: TextAlign.center,
+                style: theme.textTheme.bodyMedium?.copyWith(
+                  color: colors.onSurfaceVariant,
+                  height: 1.45,
+                ),
+              ),
+              const Spacer(flex: 4),
+              SizedBox(
+                width: double.infinity,
+                height: 52,
+                child: OutlinedButton(
+                  onPressed: _busy ? null : _signIn,
+                  style: OutlinedButton.styleFrom(
+                    side: BorderSide(color: colors.outlineVariant),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(14),
+                    ),
                   ),
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    crossAxisAlignment: CrossAxisAlignment.center,
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      const SizedBox(height: 12),
-                      Column(
-                        children: [
-                          Container(
-                            padding: const EdgeInsets.all(22),
-                            decoration: BoxDecoration(
-                              color: colors.primaryContainer.withValues(
-                                alpha: 0.35,
+                      _busy
+                          ? const SizedBox(
+                              width: 22,
+                              height: 22,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2.5,
                               ),
-                              shape: BoxShape.circle,
-                            ),
-                            child: Icon(
-                              Icons.security_rounded,
-                              size: 60,
-                              color: colors.primary,
-                            ),
-                          ),
-                          const SizedBox(height: 28),
-                          Text(
-                            'Welcome to Talksy Authenticator',
-                            textAlign: TextAlign.center,
-                            style: theme.textTheme.headlineSmall?.copyWith(
-                              fontWeight: FontWeight.bold,
-                              letterSpacing: -0.5,
-                            ),
-                          ),
-                          const SizedBox(height: 12),
-                          Text(
-                            'Sign in with your registered particular email which you have used to create your Talksy account.',
-                            textAlign: TextAlign.center,
-                            style: theme.textTheme.bodyMedium?.copyWith(
-                              color: colors.onSurfaceVariant,
-                              height: 1.45,
-                            ),
-                          ),
-                        ],
+                            )
+                          : const GoogleLogo(size: 22),
+                      const SizedBox(width: 12),
+                      Text(
+                        _busy ? 'Signing in...' : 'Sign in with Google',
+                        style: theme.textTheme.titleMedium?.copyWith(
+                          color: colors.onSurface,
+                          fontWeight: FontWeight.w600,
+                        ),
                       ),
-                      const SizedBox(height: 32),
-                      Column(
-                        children: [
-                          SizedBox(
-                            width: double.infinity,
-                            height: 52,
-                            child: OutlinedButton(
-                              onPressed: _isLoading
-                                  ? null
-                                  : _handleGoogleSignIn,
-                              style: OutlinedButton.styleFrom(
-                                backgroundColor: colors.surface,
-                                side: BorderSide(
-                                  color: colors.outlineVariant,
-                                  width: 1.2,
-                                ),
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(16),
-                                ),
-                                elevation: 0,
-                              ),
-                              child: Row(
-                                mainAxisAlignment: MainAxisAlignment.center,
-                                children: [
-                                  _isLoading
-                                      ? SizedBox(
-                                          width: 22,
-                                          height: 22,
-                                          child: CircularProgressIndicator(
-                                            strokeWidth: 2.5,
-                                            color: colors.primary,
-                                          ),
-                                        )
-                                      : const GoogleLogo(size: 22),
-                                  const SizedBox(width: 14),
-                                  Text(
-                                    _isLoading
-                                        ? 'Signing in...'
-                                        : 'Sign in with Google',
-                                    style: theme.textTheme.titleMedium
-                                        ?.copyWith(
-                                          color: colors.onSurface,
-                                          fontWeight: FontWeight.w600,
-                                        ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ),
-                          const SizedBox(height: 20),
-                          Text(
-                            'If you have already created your account with a email address and password, '
-                            'sign in with that same email address to access your code.',
-                            textAlign: TextAlign.center,
-                            style: theme.textTheme.bodySmall?.copyWith(
-                              fontSize: 11.5,
-                              color: colors.onSurfaceVariant.withValues(
-                                alpha: 0.85,
-                              ),
-                              height: 1.4,
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 12),
                     ],
                   ),
                 ),
               ),
-            );
-          },
+              const SizedBox(height: 16),
+              Text(
+                'Created your account with an email and password? '
+                'Sign in with that same email address to get your code for Talksy app.',
+                textAlign: TextAlign.center,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: colors.onSurfaceVariant,
+                  height: 1.4,
+                ),
+              ),
+              const SizedBox(height: 24),
+            ],
+          ),
         ),
       ),
     );
@@ -547,7 +445,7 @@ class _GoogleLogoPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     final stroke = size.width * 0.2;
     final center = size.center(Offset.zero);
-    final arcBounds = Rect.fromCircle(
+    final bounds = Rect.fromCircle(
       center: center,
       radius: (size.width - stroke) / 2,
     );
@@ -555,21 +453,21 @@ class _GoogleLogoPainter extends CustomPainter {
       ..style = PaintingStyle.stroke
       ..strokeWidth = stroke;
 
-    void drawArc(Color color, double startDegrees, double sweepDegrees) {
+    void arc(Color color, double start, double sweep) {
       paint.color = color;
       canvas.drawArc(
-        arcBounds,
-        startDegrees * math.pi / 180,
-        sweepDegrees * math.pi / 180,
+        bounds,
+        start * math.pi / 180,
+        sweep * math.pi / 180,
         false,
         paint,
       );
     }
 
-    drawArc(_red, -150, 105);
-    drawArc(_yellow, 150, 60);
-    drawArc(_green, 45, 105);
-    drawArc(_blue, 0, 45);
+    arc(_red, -150, 105);
+    arc(_yellow, 150, 60);
+    arc(_green, 45, 105);
+    arc(_blue, 0, 45);
 
     canvas.drawRect(
       Rect.fromLTRB(
@@ -586,6 +484,45 @@ class _GoogleLogoPainter extends CustomPainter {
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
 
+class Avatar extends StatelessWidget {
+  const Avatar({super.key, required this.url, this.radius = 20});
+
+  final String url;
+  final double radius;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final fallback = Center(
+      child: Icon(
+        CupertinoIcons.person_fill,
+        size: radius,
+        color: colors.onPrimaryContainer,
+      ),
+    );
+
+    return CircleAvatar(
+      radius: radius,
+      backgroundColor: colors.primaryContainer,
+      child: url.isEmpty
+          ? fallback
+          : ClipOval(
+              child: CachedNetworkImage(
+                imageUrl: url,
+                width: radius * 2,
+                height: radius * 2,
+                fit: BoxFit.cover,
+                memCacheWidth: 160,
+                fadeInDuration: Duration.zero,
+                fadeOutDuration: Duration.zero,
+                placeholder: (_, _) => fallback,
+                errorWidget: (_, _, _) => fallback,
+              ),
+            ),
+    );
+  }
+}
+
 enum _CodeState { loading, offline, idle, active }
 
 class HomeScreen extends StatefulWidget {
@@ -599,23 +536,21 @@ class _HomeScreenState extends State<HomeScreen>
     with WidgetsBindingObserver, SingleTickerProviderStateMixin {
   static const _lifetime = 60;
   static const _warnAt = 10;
+  static const _retryDelay = Duration(seconds: 5);
+
+  final _gateway = ApiGateway.instance;
 
   late final AnimationController _clock;
-  Timer? _ticker;
+  late final Timer _ticker;
+  late final StreamSubscription<bool> _sessionWatch;
 
-  UserProfile _profile = const UserProfile(
-    firstName: '',
-    lastName: '',
-    email: '',
-    avatarUrl: '',
-  );
-  bool _profileLoading = true;
+  Profile _profile = ProfileStore.read();
 
   _CodeState _state = _CodeState.loading;
   String _code = '';
   DateTime _expiresAt = DateTime.now();
   DateTime _retryAt = DateTime.now();
-  bool _requesting = false;
+  int _ticket = 0;
   bool _generating = false;
   bool _loggingOut = false;
 
@@ -623,6 +558,9 @@ class _HomeScreenState extends State<HomeScreen>
     final millis = _expiresAt.difference(DateTime.now()).inMilliseconds;
     return (millis / 1000).ceil().clamp(0, _lifetime);
   }
+
+  bool get _hasValidCode =>
+      _state == _CodeState.active && _expiresAt.isAfter(DateTime.now());
 
   @override
   void initState() {
@@ -633,53 +571,44 @@ class _HomeScreenState extends State<HomeScreen>
       duration: const Duration(seconds: _lifetime),
     );
     _ticker = Timer.periodic(const Duration(seconds: 1), (_) => _onTick());
-    _initializeData();
+    _sessionWatch = _gateway.sessionChanges.listen((signedIn) {
+      if (!signedIn) _leave();
+    });
+    _refreshProfile();
+    _loadCode();
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    _ticker?.cancel();
+    _sessionWatch.cancel();
+    _ticker.cancel();
     _clock.dispose();
     super.dispose();
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state != AppLifecycleState.resumed) return;
+    if (state != AppLifecycleState.resumed || _loggingOut) return;
     if (_hasValidCode) _syncClock();
-    _fetchCode(isInitial: false);
+    _loadCode();
   }
 
-  Future<void> _initializeData() async {
-    final cached = await ApiGateway.instance.getCachedProfile();
-    if (!mounted) return;
-    setState(() {
-      _profile = cached;
-      _profileLoading = false;
-    });
-
-    _fetchCode(isInitial: true);
-
-    final remote = await ApiGateway.instance.fetchAndCacheProfile();
-    if (!mounted) return;
-    setState(() {
-      _profile = remote;
-    });
+  Future<void> _refreshProfile() async {
+    final profile = await syncProfile();
+    if (profile == null || !mounted) return;
+    setState(() => _profile = profile);
   }
 
   void _onTick() {
-    if (!mounted) return;
+    if (!mounted || _loggingOut) return;
 
     if (_state == _CodeState.active) {
-      if (_secondsLeft == 0) {
-        _showIdle();
-      } else {
-        setState(() {});
-      }
+      _secondsLeft == 0 ? _showIdle() : setState(() {});
     } else if (_state == _CodeState.offline &&
         DateTime.now().isAfter(_retryAt)) {
-      _fetchCode(isInitial: false);
+      _retryAt = DateTime.now().add(_retryDelay);
+      _loadCode();
     }
   }
 
@@ -693,22 +622,22 @@ class _HomeScreenState extends State<HomeScreen>
 
   void _showOffline() {
     _clock.reset();
-    _retryAt = DateTime.now().add(const Duration(seconds: 5));
+    _retryAt = DateTime.now().add(_retryDelay);
     setState(() {
       _code = '';
       _state = _CodeState.offline;
     });
   }
 
-  void _showCode(String code, double secondsLeft, DateTime requestedAt) {
-    final remaining = secondsLeft.clamp(0.0, _lifetime.toDouble());
+  void _showCode(CodeSnapshot snapshot, DateTime askedAt) {
+    final remaining = snapshot.secondsLeft.clamp(0.0, _lifetime.toDouble());
     if (remaining == 0) {
       _showIdle();
       return;
     }
     setState(() {
-      _code = code;
-      _expiresAt = requestedAt.add(
+      _code = snapshot.code;
+      _expiresAt = askedAt.add(
         Duration(milliseconds: (remaining * 1000).round()),
       );
       _state = _CodeState.active;
@@ -722,65 +651,34 @@ class _HomeScreenState extends State<HomeScreen>
     _clock.forward(from: elapsed.clamp(0.0, 1.0));
   }
 
-  bool get _hasValidCode =>
-      _state == _CodeState.active && _expiresAt.isAfter(DateTime.now());
+  bool _isCurrent(int ticket) => mounted && !_loggingOut && ticket == _ticket;
 
-  Future<void> _fetchCode({required bool isInitial}) async {
-    if (_requesting || _loggingOut) return;
-    _requesting = true;
+  Future<void> _loadCode({bool fresh = false}) async {
+    if (_loggingOut) return;
+    final ticket = ++_ticket;
+    final askedAt = DateTime.now();
 
-    final requestedAt = DateTime.now();
-    final row = await ApiGateway.instance.getMyCode();
-
-    if (!mounted || _loggingOut) {
-      _requesting = false;
-      return;
+    try {
+      final snapshot = fresh
+          ? await _gateway.generateCode()
+          : await _gateway.currentCode();
+      if (!_isCurrent(ticket)) return;
+      snapshot == null ? _showIdle() : _showCode(snapshot, askedAt);
+    } catch (_) {
+      if (!_isCurrent(ticket)) return;
+      _hasValidCode ? _syncClock() : _showOffline();
     }
-
-    if (row == null) {
-      if (_hasValidCode) {
-        _syncClock();
-      } else if (isInitial) {
-        _showIdle();
-      } else {
-        _showOffline();
-      }
-    } else {
-      _showCode(
-        row['code'] as String,
-        (row['seconds_left'] as num).toDouble(),
-        requestedAt,
-      );
-    }
-    _requesting = false;
   }
 
-  Future<void> _generateCode() async {
-    if (_generating || _loggingOut) return;
+  Future<void> _generate() async {
+    if (_generating) return;
     setState(() => _generating = true);
-
-    final requestedAt = DateTime.now();
-    final row = await ApiGateway.instance.generateMyCode();
-
-    if (!mounted || _loggingOut) {
-      setState(() => _generating = false);
-      return;
-    }
-
-    if (row == null) {
-      _showOffline();
-    } else {
-      _showCode(
-        row['code'] as String,
-        (row['seconds_left'] as num).toDouble(),
-        requestedAt,
-      );
-    }
-    setState(() => _generating = false);
+    await _loadCode(fresh: true);
+    if (mounted) setState(() => _generating = false);
   }
 
-  Future<bool?> _confirmLogout() {
-    return showCupertinoDialog<bool>(
+  Future<bool> _confirmLogout() async {
+    final confirmed = await showCupertinoDialog<bool>(
       context: context,
       builder: (dialogContext) => CupertinoAlertDialog(
         title: const Text('Log out'),
@@ -798,17 +696,21 @@ class _HomeScreenState extends State<HomeScreen>
         ],
       ),
     );
+    return confirmed == true;
   }
 
   Future<void> _logout() async {
     if (_loggingOut) return;
-    final confirmed = await _confirmLogout();
-    if (confirmed != true || !mounted) return;
+    if (!await _confirmLogout() || !mounted) return;
+    await _leave();
+  }
 
-    _ticker?.cancel();
+  Future<void> _leave() async {
+    if (_loggingOut || !mounted) return;
     setState(() => _loggingOut = true);
+    _ticker.cancel();
 
-    await ApiGateway.instance.clearCacheAndSession();
+    await clearSession();
 
     if (!mounted) return;
     replaceWith(context, const LoginScreen());
@@ -826,32 +728,19 @@ class _HomeScreenState extends State<HomeScreen>
         children: [
           Scaffold(
             appBar: AppBar(
-              toolbarHeight: 44,
-              elevation: 0,
-              scrolledUnderElevation: 0,
-              centerTitle: false,
-              backgroundColor: theme.scaffoldBackgroundColor,
-              surfaceTintColor: Colors.transparent,
               title: const Text(
                 'Talksy Authenticator',
                 style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
               ),
+              centerTitle: false,
+              scrolledUnderElevation: 0,
               actions: [
-                Padding(
-                  padding: const EdgeInsets.only(right: 12),
-                  child: IconButton.filledTonal(
-                    tooltip: 'Log out',
-                    onPressed: _logout,
-                    style: IconButton.styleFrom(
-                      backgroundColor: colors.errorContainer.withValues(
-                        alpha: 0.6,
-                      ),
-                      foregroundColor: colors.onErrorContainer,
-                      fixedSize: const Size(36, 36),
-                    ),
-                    icon: const Icon(Icons.logout_rounded, size: 18),
-                  ),
+                IconButton(
+                  tooltip: 'Log out',
+                  onPressed: _logout,
+                  icon: const Icon(Icons.logout_rounded),
                 ),
+                const SizedBox(width: 4),
               ],
             ),
             body: SafeArea(
@@ -865,38 +754,28 @@ class _HomeScreenState extends State<HomeScreen>
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        _card(
-                          theme,
-                          _profileLoading && _profile.firstName.isEmpty
-                              ? _profileSkeleton(theme)
-                              : _profileWidget(theme),
-                        ),
+                        _SectionCard(child: _ProfileRow(profile: _profile)),
                         const SizedBox(height: 24),
-                        const Padding(
-                          padding: EdgeInsets.only(left: 4),
+                        Padding(
+                          padding: const EdgeInsets.only(left: 4),
                           child: Text(
                             'Code',
-                            style: TextStyle(
-                              fontSize: 16,
+                            style: theme.textTheme.titleMedium?.copyWith(
                               fontWeight: FontWeight.w600,
                             ),
                           ),
                         ),
                         const SizedBox(height: 8),
-                        _card(theme, _codeContent(theme)),
-                        const SizedBox(height: 10),
-                        SizedBox(
-                          width: double.infinity,
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 6),
-                            child: Text(
-                              'This code will only be valid for 60 seconds and can be used for login in Talksy app. If you are unable to use the code within this time frame, you can generate a new one.',
-                              textAlign: TextAlign.justify,
-                              style: TextStyle(
-                                fontSize: 12,
-                                height: 1.35,
-                                color: theme.hintColor,
-                              ),
+                        _SectionCard(child: _codeContent(theme)),
+                        const SizedBox(height: 12),
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 4),
+                          child: Text(
+                            'This code is valid for 60 seconds and can be used to log in. '
+                            'If it expires before you can use it, generate a new one.',
+                            style: theme.textTheme.bodySmall?.copyWith(
+                              color: colors.onSurfaceVariant,
+                              height: 1.4,
                             ),
                           ),
                         ),
@@ -907,44 +786,133 @@ class _HomeScreenState extends State<HomeScreen>
               ),
             ),
           ),
-          if (_loggingOut) _logoutOverlay(theme),
+          if (_loggingOut)
+            ModalBarrier(
+              dismissible: false,
+              color: theme.scaffoldBackgroundColor.withValues(alpha: 0.85),
+            ),
+          if (_loggingOut)
+            Center(
+              child: CupertinoActivityIndicator(
+                radius: 16,
+                color: colors.onSurfaceVariant,
+              ),
+            ),
         ],
       ),
     );
   }
 
-  Widget _logoutOverlay(ThemeData theme) {
-    return Stack(
-      fit: StackFit.expand,
-      children: [
-        ModalBarrier(
-          dismissible: false,
-          color: theme.scaffoldBackgroundColor.withValues(alpha: 0.85),
-        ),
-        Center(
-          child: CupertinoActivityIndicator(
-            radius: 16,
-            color: theme.colorScheme.onSurfaceVariant,
-          ),
-        ),
-      ],
-    );
-  }
+  Widget _codeContent(ThemeData theme) {
+    final colors = theme.colorScheme;
 
-  Widget _card(ThemeData theme, Widget child) {
+    switch (_state) {
+      case _CodeState.loading:
+        return Container(
+          height: 46,
+          decoration: BoxDecoration(
+            color: colors.surfaceContainerHighest,
+            borderRadius: BorderRadius.circular(10),
+          ),
+        );
+      case _CodeState.offline:
+        return SizedBox(
+          height: 46,
+          child: Row(
+            children: [
+              Icon(
+                CupertinoIcons.wifi_slash,
+                size: 18,
+                color: colors.onSurfaceVariant,
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  'Connect to the internet to get code.',
+                  style: TextStyle(
+                    fontSize: 14,
+                    color: colors.onSurfaceVariant,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      case _CodeState.idle:
+        return SizedBox(
+          width: double.infinity,
+          height: 46,
+          child: FilledButton(
+            onPressed: _generating ? null : _generate,
+            style: FilledButton.styleFrom(
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+              ),
+              textStyle: const TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            child: _generating
+                ? const CupertinoActivityIndicator(color: Colors.white)
+                : const Text('Generate code'),
+          ),
+        );
+      case _CodeState.active:
+        final spaced = _code.length == 6
+            ? '${_code.substring(0, 3)} ${_code.substring(3)}'
+            : _code;
+        return SizedBox(
+          height: 46,
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  spaced,
+                  style: TextStyle(
+                    fontSize: 30,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 4,
+                    color: _secondsLeft <= _warnAt
+                        ? colors.error
+                        : colors.onSurface,
+                    fontFeatures: const [FontFeature.tabularFigures()],
+                  ),
+                ),
+              ),
+              SizedBox(
+                width: 24,
+                height: 24,
+                child: CustomPaint(
+                  painter: _ClockPainter(_clock, colors.primary),
+                ),
+              ),
+            ],
+          ),
+        );
+    }
+  }
+}
+
+class _SectionCard extends StatelessWidget {
+  const _SectionCard({required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+
     return SizedBox(
       width: double.infinity,
       child: Card(
         elevation: 0,
         margin: EdgeInsets.zero,
-        color: theme.cardColor,
+        color: colors.surfaceContainerLow,
         surfaceTintColor: Colors.transparent,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(14),
-          side: BorderSide(
-            color: theme.dividerColor.withValues(alpha: 0.25),
-            width: 0.5,
-          ),
+          side: BorderSide(color: colors.outlineVariant, width: 0.6),
         ),
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
@@ -953,27 +921,21 @@ class _HomeScreenState extends State<HomeScreen>
       ),
     );
   }
+}
 
-  Widget _profileWidget(ThemeData theme) {
-    final hasAvatar = _profile.avatarUrl.isNotEmpty;
-    final name = _profile.fullName;
-    final email = _profile.email;
+class _ProfileRow extends StatelessWidget {
+  const _ProfileRow({required this.profile});
+
+  final Profile profile;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final name = profile.fullName;
 
     return Row(
       children: [
-        CircleAvatar(
-          radius: 20,
-          backgroundColor: theme.colorScheme.primaryContainer,
-          backgroundImage: hasAvatar ? NetworkImage(_profile.avatarUrl) : null,
-          onBackgroundImageError: hasAvatar ? (_, _) {} : null,
-          child: hasAvatar
-              ? null
-              : Icon(
-                  CupertinoIcons.person_fill,
-                  size: 20,
-                  color: theme.colorScheme.onPrimaryContainer,
-                ),
-        ),
+        Avatar(url: profile.avatarUrl),
         const SizedBox(width: 12),
         Expanded(
           child: Column(
@@ -989,169 +951,49 @@ class _HomeScreenState extends State<HomeScreen>
               ),
               const SizedBox(height: 2),
               Text(
-                email.isEmpty ? 'No email provided' : email,
+                profile.email.isEmpty ? 'No email provided' : profile.email,
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
                   fontSize: 12.5,
-                  color: theme.textTheme.bodySmall?.color,
+                  color: colors.onSurfaceVariant,
                 ),
               ),
             ],
           ),
         ),
       ],
-    );
-  }
-
-  Widget _profileSkeleton(ThemeData theme) {
-    final color = theme.dividerColor.withValues(alpha: 0.15);
-
-    Widget bar(double width, double height) {
-      return Container(
-        width: width,
-        height: height,
-        decoration: BoxDecoration(
-          color: color,
-          borderRadius: BorderRadius.circular(4),
-        ),
-      );
-    }
-
-    return Row(
-      children: [
-        Container(
-          width: 40,
-          height: 40,
-          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
-        ),
-        const SizedBox(width: 12),
-        Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [bar(120, 14), const SizedBox(height: 6), bar(180, 11)],
-        ),
-      ],
-    );
-  }
-
-  Widget _codeContent(ThemeData theme) {
-    switch (_state) {
-      case _CodeState.loading:
-        return Container(
-          height: 46,
-          decoration: BoxDecoration(
-            color: theme.dividerColor.withValues(alpha: 0.15),
-            borderRadius: BorderRadius.circular(10),
-          ),
-        );
-      case _CodeState.offline:
-        return SizedBox(
-          height: 46,
-          child: Row(
-            children: [
-              Icon(CupertinoIcons.wifi_slash, size: 18, color: theme.hintColor),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Text(
-                  'Connect to internet to see code',
-                  style: TextStyle(fontSize: 14, color: theme.hintColor),
-                ),
-              ),
-            ],
-          ),
-        );
-      case _CodeState.idle:
-        return _generateButton();
-      case _CodeState.active:
-        return _activeCode(theme);
-    }
-  }
-
-  Widget _generateButton() {
-    return SizedBox(
-      width: double.infinity,
-      height: 46,
-      child: FilledButton(
-        onPressed: _generating ? null : _generateCode,
-        style: FilledButton.styleFrom(
-          backgroundColor: _lightBlue,
-          foregroundColor: Colors.white,
-          disabledBackgroundColor: _lightBlue.withValues(alpha: 0.7),
-          disabledForegroundColor: Colors.white70,
-          elevation: 0,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(12),
-          ),
-          textStyle: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
-        ),
-        child: _generating
-            ? const CupertinoActivityIndicator(color: Colors.white)
-            : const Text('Generate code'),
-      ),
-    );
-  }
-
-  Widget _activeCode(ThemeData theme) {
-    final expiring = _secondsLeft <= _warnAt;
-    final text = _code.length == 6
-        ? '${_code.substring(0, 3)} ${_code.substring(3)}'
-        : _code;
-
-    return SizedBox(
-      height: 46,
-      child: Row(
-        children: [
-          Expanded(
-            child: Text(
-              text,
-              style: TextStyle(
-                fontSize: 30,
-                fontWeight: FontWeight.w700,
-                letterSpacing: 4,
-                color: expiring
-                    ? theme.colorScheme.error
-                    : theme.colorScheme.onSurface,
-                fontFeatures: const [FontFeature.tabularFigures()],
-              ),
-            ),
-          ),
-          const SizedBox(width: 8),
-          SizedBox(
-            width: 24,
-            height: 24,
-            child: CustomPaint(painter: _ClockPainter(_clock)),
-          ),
-        ],
-      ),
     );
   }
 }
 
 class _ClockPainter extends CustomPainter {
-  _ClockPainter(this.progress) : super(repaint: progress);
+  _ClockPainter(this.progress, this.color) : super(repaint: progress);
 
   final Animation<double> progress;
+  final Color color;
 
   @override
   void paint(Canvas canvas, Size size) {
     final center = size.center(Offset.zero);
     final radius = size.width / 2 - 1;
 
-    final fill = Paint()..color = _lightBlue;
-    final border = Paint()
-      ..color = _lightBlue
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.6;
-
     canvas.drawArc(
       Rect.fromCircle(center: center, radius: radius),
       -math.pi / 2,
       progress.value * 2 * math.pi,
       true,
-      fill,
+      Paint()..color = color,
     );
-    canvas.drawCircle(center, radius, border);
+    canvas.drawCircle(
+      center,
+      radius,
+      Paint()
+        ..color = color
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.6,
+    );
   }
 
   @override
-  bool shouldRepaint(_ClockPainter oldDelegate) => false;
+  bool shouldRepaint(_ClockPainter oldDelegate) => oldDelegate.color != color;
 }
