@@ -20,42 +20,106 @@ void replaceWith(BuildContext context, Widget screen) {
   );
 }
 
-Future<Map<String, dynamic>?> fetchProfile() async {
-  final user = supabase.auth.currentUser;
-  if (user == null) return null;
+class UserProfile {
+  const UserProfile({
+    required this.firstName,
+    required this.lastName,
+    required this.email,
+    required this.avatarUrl,
+  });
 
-  try {
-    final profile = await supabase
-        .from('profiles')
-        .select()
-        .eq('id', user.id)
-        .maybeSingle();
-    if (profile == null) return null;
+  final String firstName;
+  final String lastName;
+  final String email;
+  final String avatarUrl;
 
+  String get fullName => '$firstName $lastName'.trim();
+}
+
+class ApiGateway {
+  ApiGateway._();
+  static final ApiGateway instance = ApiGateway._();
+
+  static const String _kFirstName = 'cache_first_name';
+  static const String _kLastName = 'cache_last_name';
+  static const String _kEmail = 'cache_email';
+  static const String _kAvatarUrl = 'cache_avatar_url';
+
+  static const String _getCodeRpc = 'get_my_code';
+  static const String _generateCodeRpc = 'generate_my_code';
+
+  Future<UserProfile> getCachedProfile() async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('first_name', profile['first_name'] ?? '');
-    await prefs.setString('last_name', profile['last_name'] ?? '');
-    await prefs.setString('email', profile['email'] ?? user.email ?? '');
-    await prefs.setString('avatar_url', profile['avatar_url'] ?? '');
-    return profile;
-  } catch (_) {
-    return null;
+    return UserProfile(
+      firstName: prefs.getString(_kFirstName) ?? '',
+      lastName: prefs.getString(_kLastName) ?? '',
+      email: prefs.getString(_kEmail) ?? supabase.auth.currentUser?.email ?? '',
+      avatarUrl: prefs.getString(_kAvatarUrl) ?? '',
+    );
   }
-}
 
-Future<void> signOutGoogle() async {
-  try {
-    await GoogleSignIn.instance.signOut();
-  } catch (_) {}
-}
+  Future<UserProfile> fetchAndCacheProfile() async {
+    final user = supabase.auth.currentUser;
+    if (user == null) return await getCachedProfile();
 
-Future<void> clearSession() async {
-  await signOutGoogle();
-  try {
-    await supabase.auth.signOut();
-  } catch (_) {}
-  final prefs = await SharedPreferences.getInstance();
-  await prefs.clear();
+    try {
+      final profile = await supabase
+          .from('profiles')
+          .select()
+          .eq('id', user.id)
+          .maybeSingle();
+
+      if (profile == null) return await getCachedProfile();
+
+      final firstName = profile['first_name'] ?? '';
+      final lastName = profile['last_name'] ?? '';
+      final email = profile['email'] ?? user.email ?? '';
+      final avatarUrl = profile['avatar_url'] ?? '';
+
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_kFirstName, firstName);
+      await prefs.setString(_kLastName, lastName);
+      await prefs.setString(_kEmail, email);
+      await prefs.setString(_kAvatarUrl, avatarUrl);
+
+      return UserProfile(
+        firstName: firstName,
+        lastName: lastName,
+        email: email,
+        avatarUrl: avatarUrl,
+      );
+    } catch (_) {
+      return await getCachedProfile();
+    }
+  }
+
+  Future<Map<String, dynamic>?> requestRpcCode(String functionName) async {
+    try {
+      final rows =
+          await supabase.rpc(functionName).timeout(const Duration(seconds: 8))
+              as List;
+      if (rows.isEmpty) return null;
+      return rows.first as Map<String, dynamic>;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<Map<String, dynamic>?> getMyCode() => requestRpcCode(_getCodeRpc);
+
+  Future<Map<String, dynamic>?> generateMyCode() =>
+      requestRpcCode(_generateCodeRpc);
+
+  Future<void> clearCacheAndSession() async {
+    try {
+      await GoogleSignIn.instance.signOut();
+    } catch (_) {}
+    try {
+      await supabase.auth.signOut();
+    } catch (_) {}
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.clear();
+  }
 }
 
 Future<void> main() async {
@@ -178,7 +242,7 @@ class _SplashScreenState extends State<SplashScreen>
   }
 
   Future<void> _checkSession() async {
-    await Future.delayed(const Duration(milliseconds: 1500));
+    await Future.delayed(const Duration(milliseconds: 1200));
     try {
       final session = supabase.auth.currentSession;
       if (!mounted) return;
@@ -285,7 +349,9 @@ class _LoginScreenState extends State<LoginScreen> {
       );
 
       if (response != true) {
-        await signOutGoogle();
+        try {
+          await GoogleSignIn.instance.signOut();
+        } catch (_) {}
         _showError('This email is not registered.');
         return;
       }
@@ -299,7 +365,7 @@ class _LoginScreenState extends State<LoginScreen> {
         provider: OAuthProvider.google,
         idToken: idToken,
       );
-      await fetchProfile();
+      await ApiGateway.instance.fetchAndCacheProfile();
 
       if (!mounted) return;
       replaceWith(context, const HomeScreen());
@@ -308,7 +374,9 @@ class _LoginScreenState extends State<LoginScreen> {
         _showError('Google sign in failed. Please try again.');
       }
     } catch (_) {
-      await signOutGoogle();
+      try {
+        await GoogleSignIn.instance.signOut();
+      } catch (_) {}
       _showError('Sign in failed. Please try again.');
     } finally {
       if (mounted) setState(() => _isLoading = false);
@@ -531,16 +599,16 @@ class _HomeScreenState extends State<HomeScreen>
     with WidgetsBindingObserver, SingleTickerProviderStateMixin {
   static const _lifetime = 60;
   static const _warnAt = 10;
-  static const _getCodeRpc = 'get_my_code';
-  static const _generateCodeRpc = 'generate_my_code';
 
   late final AnimationController _clock;
   Timer? _ticker;
 
-  String _firstName = '';
-  String _lastName = '';
-  String _email = '';
-  String _avatarUrl = '';
+  UserProfile _profile = const UserProfile(
+    firstName: '',
+    lastName: '',
+    email: '',
+    avatarUrl: '',
+  );
   bool _profileLoading = true;
 
   _CodeState _state = _CodeState.loading;
@@ -550,8 +618,6 @@ class _HomeScreenState extends State<HomeScreen>
   bool _requesting = false;
   bool _generating = false;
   bool _loggingOut = false;
-
-  String get _name => '$_firstName $_lastName'.trim();
 
   int get _secondsLeft {
     final millis = _expiresAt.difference(DateTime.now()).inMilliseconds;
@@ -567,8 +633,7 @@ class _HomeScreenState extends State<HomeScreen>
       duration: const Duration(seconds: _lifetime),
     );
     _ticker = Timer.periodic(const Duration(seconds: 1), (_) => _onTick());
-    _loadProfile();
-    _requestCode(_getCodeRpc);
+    _initializeData();
   }
 
   @override
@@ -583,28 +648,23 @@ class _HomeScreenState extends State<HomeScreen>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state != AppLifecycleState.resumed) return;
     if (_hasValidCode) _syncClock();
-    _requestCode(_getCodeRpc);
+    _fetchCode(isInitial: false);
   }
 
-  Future<void> _loadProfile() async {
-    final prefs = await SharedPreferences.getInstance();
+  Future<void> _initializeData() async {
+    final cached = await ApiGateway.instance.getCachedProfile();
     if (!mounted) return;
     setState(() {
-      _firstName = prefs.getString('first_name') ?? '';
-      _lastName = prefs.getString('last_name') ?? '';
-      _email =
-          prefs.getString('email') ?? supabase.auth.currentUser?.email ?? '';
-      _avatarUrl = prefs.getString('avatar_url') ?? '';
+      _profile = cached;
       _profileLoading = false;
     });
 
-    final profile = await fetchProfile();
-    if (!mounted || profile == null) return;
+    _fetchCode(isInitial: true);
+
+    final remote = await ApiGateway.instance.fetchAndCacheProfile();
+    if (!mounted) return;
     setState(() {
-      _firstName = profile['first_name'] ?? _firstName;
-      _lastName = profile['last_name'] ?? _lastName;
-      _email = profile['email'] ?? _email;
-      _avatarUrl = profile['avatar_url'] ?? _avatarUrl;
+      _profile = remote;
     });
   }
 
@@ -619,7 +679,7 @@ class _HomeScreenState extends State<HomeScreen>
       }
     } else if (_state == _CodeState.offline &&
         DateTime.now().isAfter(_retryAt)) {
-      _requestCode(_getCodeRpc);
+      _fetchCode(isInitial: false);
     }
   }
 
@@ -665,49 +725,58 @@ class _HomeScreenState extends State<HomeScreen>
   bool get _hasValidCode =>
       _state == _CodeState.active && _expiresAt.isAfter(DateTime.now());
 
-  Future<void> _requestCode(String function) async {
+  Future<void> _fetchCode({required bool isInitial}) async {
     if (_requesting || _loggingOut) return;
     _requesting = true;
 
-    try {
-      final requestedAt = DateTime.now();
-      final rows =
-          await supabase.rpc(function).timeout(const Duration(seconds: 8))
-              as List;
-      if (!mounted || _loggingOut) return;
+    final requestedAt = DateTime.now();
+    final row = await ApiGateway.instance.getMyCode();
 
-      if (rows.isEmpty) {
+    if (!mounted || _loggingOut) {
+      _requesting = false;
+      return;
+    }
+
+    if (row == null) {
+      if (_hasValidCode) {
+        _syncClock();
+      } else if (isInitial) {
         _showIdle();
-        return;
+      } else {
+        _showOffline();
       }
-
-      final row = rows.first as Map<String, dynamic>;
+    } else {
       _showCode(
         row['code'] as String,
         (row['seconds_left'] as num).toDouble(),
         requestedAt,
       );
-    } catch (_) {
-      if (mounted && !_loggingOut) {
-        if (_hasValidCode) {
-          _syncClock();
-        } else {
-          _showOffline();
-        }
-      }
-    } finally {
-      _requesting = false;
     }
+    _requesting = false;
   }
 
   Future<void> _generateCode() async {
-    if (_generating) return;
+    if (_generating || _loggingOut) return;
     setState(() => _generating = true);
-    try {
-      await _requestCode(_generateCodeRpc);
-    } finally {
-      if (mounted) setState(() => _generating = false);
+
+    final requestedAt = DateTime.now();
+    final row = await ApiGateway.instance.generateMyCode();
+
+    if (!mounted || _loggingOut) {
+      setState(() => _generating = false);
+      return;
     }
+
+    if (row == null) {
+      _showOffline();
+    } else {
+      _showCode(
+        row['code'] as String,
+        (row['seconds_left'] as num).toDouble(),
+        requestedAt,
+      );
+    }
+    setState(() => _generating = false);
   }
 
   Future<bool?> _confirmLogout() {
@@ -739,7 +808,7 @@ class _HomeScreenState extends State<HomeScreen>
     _ticker?.cancel();
     setState(() => _loggingOut = true);
 
-    await clearSession();
+    await ApiGateway.instance.clearCacheAndSession();
 
     if (!mounted) return;
     replaceWith(context, const LoginScreen());
@@ -798,9 +867,9 @@ class _HomeScreenState extends State<HomeScreen>
                       children: [
                         _card(
                           theme,
-                          _profileLoading
+                          _profileLoading && _profile.firstName.isEmpty
                               ? _profileSkeleton(theme)
-                              : _profile(theme),
+                              : _profileWidget(theme),
                         ),
                         const SizedBox(height: 24),
                         const Padding(
@@ -821,7 +890,7 @@ class _HomeScreenState extends State<HomeScreen>
                           child: Padding(
                             padding: const EdgeInsets.symmetric(horizontal: 6),
                             child: Text(
-                              'This code will only be valid for 60 seconds and can be used for login. If you are unable to use the code within this time frame, you can generate a new one.',
+                              'This code will only be valid for 60 seconds and can be used for login in Talksy app. If you are unable to use the code within this time frame, you can generate a new one.',
                               textAlign: TextAlign.justify,
                               style: TextStyle(
                                 fontSize: 12,
@@ -885,15 +954,17 @@ class _HomeScreenState extends State<HomeScreen>
     );
   }
 
-  Widget _profile(ThemeData theme) {
-    final hasAvatar = _avatarUrl.isNotEmpty;
+  Widget _profileWidget(ThemeData theme) {
+    final hasAvatar = _profile.avatarUrl.isNotEmpty;
+    final name = _profile.fullName;
+    final email = _profile.email;
 
     return Row(
       children: [
         CircleAvatar(
           radius: 20,
           backgroundColor: theme.colorScheme.primaryContainer,
-          backgroundImage: hasAvatar ? NetworkImage(_avatarUrl) : null,
+          backgroundImage: hasAvatar ? NetworkImage(_profile.avatarUrl) : null,
           onBackgroundImageError: hasAvatar ? (_, _) {} : null,
           child: hasAvatar
               ? null
@@ -909,7 +980,7 @@ class _HomeScreenState extends State<HomeScreen>
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
-                _name.isEmpty ? 'Talksy User' : _name,
+                name.isEmpty ? 'Talksy User' : name,
                 overflow: TextOverflow.ellipsis,
                 style: const TextStyle(
                   fontSize: 15,
@@ -918,7 +989,7 @@ class _HomeScreenState extends State<HomeScreen>
               ),
               const SizedBox(height: 2),
               Text(
-                _email.isEmpty ? 'No email provided' : _email,
+                email.isEmpty ? 'No email provided' : email,
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
                   fontSize: 12.5,
