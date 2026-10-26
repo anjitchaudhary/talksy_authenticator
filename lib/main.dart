@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:cached_network_image/cached_network_image.dart';
@@ -9,6 +10,7 @@ import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:webview_flutter/webview_flutter.dart';
 
 const _brandColor = Color(0xFF4995DB);
 
@@ -68,6 +70,14 @@ class ApiGateway {
       params: {'email_input': email.trim().toLowerCase()},
     );
     return result == true;
+  }
+
+  Future<bool> verifyCaptcha(String token) async {
+    final response = await _client.functions
+        .invoke('verify-authenticator-captcha', body: {'captcha_token': token})
+        .timeout(_timeout);
+    final data = response.data;
+    return data is Map && data['valid'] == true;
   }
 
   Future<void> signInWithGoogle(String idToken) async {
@@ -284,11 +294,26 @@ class _LoginScreenState extends State<LoginScreen> {
     );
   }
 
+  void _openTerms() {
+    Navigator.push(
+      context,
+      CupertinoPageRoute(builder: (_) => const TermsScreen()),
+    );
+  }
+
   Future<void> _signIn() async {
     if (_busy) return;
     setState(() => _busy = true);
 
     try {
+      final captchaToken = await CaptchaDialog.show(context);
+      if (captchaToken == null) return;
+
+      if (!await _gateway.verifyCaptcha(captchaToken)) {
+        _showError('Verification failed. Please try again.');
+        return;
+      }
+
       final account = await GoogleSignIn.instance.authenticate();
 
       if (!await _gateway.isEmailRegistered(account.email)) {
@@ -313,6 +338,12 @@ class _LoginScreenState extends State<LoginScreen> {
       if (e.code != GoogleSignInExceptionCode.canceled) {
         _showError('Google sign in failed. Please try again.');
       }
+    } on FunctionException catch (e) {
+      _showError(
+        e.status == 429
+            ? 'Too many attempts. Please wait a few minutes and try again.'
+            : 'Verification failed. Please try again.',
+      );
     } catch (_) {
       await clearSession();
       _showError('Sign in failed. Check your connection and try again.');
@@ -325,94 +356,526 @@ class _LoginScreenState extends State<LoginScreen> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final colors = theme.colorScheme;
+    final primary = _brandColor;
+    final isDark = theme.brightness == Brightness.dark;
+    final mutedColor = isDark ? Colors.grey.shade400 : Colors.grey.shade600;
 
     return Scaffold(
       body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 28),
-          child: Column(
-            children: [
-              const Spacer(flex: 3),
-              Container(
-                width: 72,
-                height: 72,
-                decoration: BoxDecoration(
-                  color: colors.primaryContainer,
-                  borderRadius: BorderRadius.circular(20),
-                ),
-                child: Icon(
-                  Icons.lock_outline_rounded,
-                  size: 36,
-                  color: colors.onPrimaryContainer,
-                ),
-              ),
-              const SizedBox(height: 28),
-              Text(
-                'Talksy Authenticator',
-                textAlign: TextAlign.center,
-                style: theme.textTheme.headlineSmall?.copyWith(
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-              const SizedBox(height: 10),
-              Text(
-                'Sign in with the email you used to create your Talksy account.',
-                textAlign: TextAlign.center,
-                style: theme.textTheme.bodyMedium?.copyWith(
-                  color: colors.onSurfaceVariant,
-                  height: 1.45,
-                ),
-              ),
-              const Spacer(flex: 4),
-              SizedBox(
-                width: double.infinity,
-                height: 52,
-                child: OutlinedButton(
-                  onPressed: _busy ? null : _signIn,
-                  style: OutlinedButton.styleFrom(
-                    side: BorderSide(color: colors.outlineVariant),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(14),
+        child: Stack(
+          children: [
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 28),
+              child: Column(
+                children: [
+                  const Spacer(flex: 3),
+                  Container(
+                    width: 72,
+                    height: 72,
+                    decoration: BoxDecoration(
+                      color: colors.primaryContainer,
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(20),
+                      child: Image.asset(
+                        'assets/icon/icon.png',
+                        fit: BoxFit.cover,
+                      ),
                     ),
                   ),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
+                  const SizedBox(height: 28),
+                  Text(
+                    'Talksy Authenticator',
+                    textAlign: TextAlign.center,
+                    style: theme.textTheme.headlineSmall?.copyWith(
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  Text(
+                    'Sign in with the same email which you have used to create your Talksy app account.',
+                    textAlign: TextAlign.center,
+                    style: theme.textTheme.bodyMedium?.copyWith(
+                      color: colors.onSurfaceVariant,
+                      height: 1.45,
+                    ),
+                  ),
+                  const Spacer(flex: 4),
+                  SizedBox(
+                    width: double.infinity,
+                    height: 52,
+                    child: OutlinedButton(
+                      onPressed: _busy ? null : _signIn,
+                      style: OutlinedButton.styleFrom(
+                        side: BorderSide(color: colors.outlineVariant),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                      ),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          _busy
+                              ? const SizedBox(
+                                  width: 22,
+                                  height: 22,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2.5,
+                                  ),
+                                )
+                              : const GoogleLogo(size: 22),
+                          const SizedBox(width: 12),
+                          Text(
+                            _busy ? 'Signing in...' : 'Sign in with Google',
+                            style: theme.textTheme.titleMedium?.copyWith(
+                              color: colors.onSurface,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  Text(
+                    'Created your account with an email and password? '
+                    'Sign in with same email address to get login code.',
+                    textAlign: TextAlign.center,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: colors.onSurfaceVariant,
+                      height: 1.4,
+                    ),
+                  ),
+                  const SizedBox(height: 50),
+                ],
+              ),
+            ),
+            Positioned(
+              left: 28,
+              right: 28,
+              bottom: 20,
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: _openTerms,
+                child: Text.rich(
+                  TextSpan(
+                    text: 'By signing in, you agree to the Talksy ',
                     children: [
-                      _busy
-                          ? const SizedBox(
-                              width: 22,
-                              height: 22,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2.5,
-                              ),
-                            )
-                          : const GoogleLogo(size: 22),
-                      const SizedBox(width: 12),
-                      Text(
-                        _busy ? 'Signing in...' : 'Sign in with Google',
-                        style: theme.textTheme.titleMedium?.copyWith(
-                          color: colors.onSurface,
+                      TextSpan(
+                        text: 'Terms & Conditions',
+                        style: TextStyle(
+                          color: primary,
                           fontWeight: FontWeight.w600,
                         ),
                       ),
+                      const TextSpan(text: ' and how your data is used.'),
                     ],
+                  ),
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 12,
+                    height: 1.35,
+                    color: mutedColor,
                   ),
                 ),
               ),
-              const SizedBox(height: 16),
-              Text(
-                'Created your account with an email and password? '
-                'Sign in with that same email address to get your code for Talksy app.',
-                textAlign: TextAlign.center,
-                style: theme.textTheme.bodySmall?.copyWith(
-                  color: colors.onSurfaceVariant,
-                  height: 1.4,
-                ),
-              ),
-              const SizedBox(height: 24),
-            ],
-          ),
+            ),
+          ],
         ),
+      ),
+    );
+  }
+}
+
+class _TermsEntry {
+  const _TermsEntry(this.icon, this.title, this.text);
+
+  final IconData icon;
+  final String title;
+  final String text;
+}
+
+const String _termsUpdated = 'October 2026';
+
+const List<_TermsEntry> _collectedData = [
+  _TermsEntry(
+    Icons.alternate_email_rounded,
+    'Google account email',
+    'Used to confirm that the Google account is really yours and to link it with your Talksy login, so you can sign in with either your password or Google.',
+  ),
+  _TermsEntry(
+    Icons.badge_outlined,
+    'Name and profile',
+    'Your name and profile information help identify your authenticator link.',
+  ),
+  _TermsEntry(
+    Icons.shield_outlined,
+    'Security signals',
+    'Cloudflare Turnstile checks that a real person is signing in. Your IP address is used only as a one-way hash to limit repeated attempts and block abuse.',
+  ),
+  _TermsEntry(
+    Icons.phone_android_rounded,
+    'Data kept on your device',
+    'Session tokens and preferences are cached securely on your device so Talksy Authenticator works smoothly.',
+  ),
+];
+
+const List<_TermsEntry> _protectionPoints = [
+  _TermsEntry(
+    Icons.lock_outline_rounded,
+    'Protected sign-in',
+    'Google sign-in verification requires secure token validation and captcha checks to prevent unauthorized access.',
+  ),
+  _TermsEntry(
+    Icons.speed_rounded,
+    'Rate limiting and captcha',
+    'Sign-in attempts are limited per device network and verified with a captcha to block automated abuse.',
+  ),
+];
+
+const List<_TermsEntry> _usageRules = [
+  _TermsEntry(
+    Icons.person_outline_rounded,
+    'Eligibility and accuracy',
+    'You must use a valid registered email address that matches your Talksy account.',
+  ),
+  _TermsEntry(
+    Icons.hub_outlined,
+    'Services we rely on',
+    'Google (sign-in), Supabase (database and validation) and Cloudflare (captcha). We do not sell your personal data.',
+  ),
+];
+
+class TermsScreen extends StatelessWidget {
+  const TermsScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final bg = Theme.of(context).scaffoldBackgroundColor;
+    final textColor = isDark ? Colors.white : Colors.black87;
+    final mutedColor = isDark ? Colors.grey.shade400 : Colors.grey.shade600;
+
+    return Scaffold(
+      backgroundColor: bg,
+      appBar: AppBar(
+        backgroundColor: bg,
+        elevation: 0,
+        scrolledUnderElevation: 0,
+        toolbarHeight: 40,
+        leading: IconButton(
+          icon: Icon(Icons.arrow_back_ios_new, size: 20, color: textColor),
+          onPressed: () => Navigator.pop(context),
+        ),
+        titleSpacing: 0,
+        title: const Text(
+          'Terms & Conditions',
+          style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
+        ),
+      ),
+      body: SafeArea(
+        child: ListView(
+          padding: const EdgeInsets.fromLTRB(20, 12, 20, 28),
+          children: [
+            const Text(
+              'Your data, explained simply',
+              style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Talksy Authenticator only collects what it needs to verify and run your account. Here is exactly what we take and why.',
+              style: TextStyle(fontSize: 14, height: 1.4, color: mutedColor),
+            ),
+            const _TermsSection(
+              title: 'What is collected and why',
+              entries: _collectedData,
+            ),
+            const _TermsSection(
+              title: 'How your data is protected',
+              entries: _protectionPoints,
+            ),
+            const _TermsSection(
+              title: 'Using Authenticator',
+              entries: _usageRules,
+            ),
+            const SizedBox(height: 20),
+            Center(
+              child: Text(
+                'Last updated $_termsUpdated. By signing in you accept these terms.',
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 12, color: mutedColor),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _TermsSection extends StatelessWidget {
+  const _TermsSection({required this.title, required this.entries});
+
+  final String title;
+  final List<_TermsEntry> entries;
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final borderColor = isDark
+        ? const Color(0xFF2C2C2E)
+        : const Color(0xFFE5E5EA);
+    final mutedColor = isDark ? Colors.grey.shade400 : Colors.grey.shade600;
+    final primary = _brandColor;
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 24),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            title,
+            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+          ),
+          const SizedBox(height: 10),
+          Container(
+            decoration: BoxDecoration(
+              color: Theme.of(context).cardColor,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: borderColor, width: 0.5),
+            ),
+            child: Column(
+              children: [
+                for (var i = 0; i < entries.length; i++) ...[
+                  if (i > 0) Divider(height: 1, color: borderColor),
+                  Padding(
+                    padding: const EdgeInsets.all(14),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.all(8),
+                          decoration: BoxDecoration(
+                            color: primary.withValues(alpha: 0.1),
+                            shape: BoxShape.circle,
+                          ),
+                          child: Icon(
+                            entries[i].icon,
+                            size: 18,
+                            color: primary,
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                entries[i].title,
+                                style: const TextStyle(
+                                  fontSize: 15,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                              const SizedBox(height: 4),
+                              Text(
+                                entries[i].text,
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  height: 1.4,
+                                  color: mutedColor,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class CaptchaDialog extends StatefulWidget {
+  const CaptchaDialog({super.key});
+
+  static const String siteKey = String.fromEnvironment('TURNSTILE_SITE_KEY');
+  static const String origin = String.fromEnvironment('TURNSTILE_ORIGIN');
+
+  static Future<String?> show(BuildContext context) {
+    return showDialog<String>(
+      context: context,
+      barrierDismissible: true,
+      builder: (_) => const CaptchaDialog(),
+    );
+  }
+
+  @override
+  State<CaptchaDialog> createState() => _CaptchaDialogState();
+}
+
+class _CaptchaDialogState extends State<CaptchaDialog> {
+  static const String action = 'google_signin';
+
+  String get _page {
+    final siteKey = _jsLiteral(CaptchaDialog.siteKey);
+    return '''
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<style>
+html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: transparent; }
+body { display: flex; align-items: center; }
+#box { width: 100%; }
+</style>
+<script>
+function initCaptcha() {
+  try {
+    turnstile.render('#box', {
+      sitekey: $siteKey,
+      action: '$action',
+      size: 'flexible',
+      theme: 'auto',
+      callback: function (token) { Captcha.postMessage('token:' + token); },
+      'error-callback': function () { Captcha.postMessage('error'); }
+    });
+  } catch (e) {
+    Captcha.postMessage('error');
+  }
+}
+</script>
+<script src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit&onload=initCaptcha"
+  async defer onerror="Captcha.postMessage('error')"></script>
+</head>
+<body><div id="box"></div></body>
+</html>
+''';
+  }
+
+  static String _jsLiteral(String value) {
+    return jsonEncode(value).replaceAll('<', r'\u003c');
+  }
+
+  late final WebViewController _controller;
+  bool _loading = true;
+  bool _failed = false;
+  bool _done = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = WebViewController()
+      ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      ..setBackgroundColor(Colors.transparent)
+      ..addJavaScriptChannel('Captcha', onMessageReceived: _onMessage)
+      ..setNavigationDelegate(
+        NavigationDelegate(
+          onPageFinished: (_) {
+            if (mounted) setState(() => _loading = false);
+          },
+          onWebResourceError: (error) {
+            if (error.isForMainFrame == false || !mounted) return;
+            setState(() {
+              _failed = true;
+              _loading = false;
+            });
+          },
+        ),
+      )
+      ..loadHtmlString(_page, baseUrl: CaptchaDialog.origin);
+  }
+
+  void _onMessage(JavaScriptMessage message) {
+    if (_done || !mounted) return;
+    final data = message.message;
+    if (data.startsWith('token:')) {
+      _done = true;
+      final token = data.substring(6);
+      Future.delayed(const Duration(milliseconds: 700), () {
+        if (mounted) Navigator.of(context).pop(token);
+      });
+    } else if (data == 'error') {
+      setState(() {
+        _failed = true;
+        _loading = false;
+      });
+    }
+  }
+
+  void _retry() {
+    setState(() {
+      _failed = false;
+      _loading = true;
+    });
+    _controller.loadHtmlString(_page, baseUrl: CaptchaDialog.origin);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final textScale = MediaQuery.textScalerOf(context).scale(1).clamp(1.0, 1.6);
+    return Dialog(
+      backgroundColor: Colors.transparent,
+      surfaceTintColor: Colors.transparent,
+      elevation: 0,
+      insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 420),
+        child: SizedBox(
+          width: double.infinity,
+          height: _failed ? null : 65 * textScale,
+          child: _failed ? _errorCard(context) : _widget(),
+        ),
+      ),
+    );
+  }
+
+  Widget _widget() {
+    return Stack(
+      children: [
+        ClipRRect(
+          borderRadius: BorderRadius.circular(8),
+          child: WebViewWidget(controller: _controller),
+        ),
+        if (_loading)
+          const Center(
+            child: SizedBox(
+              width: 24,
+              height: 24,
+              child: CircularProgressIndicator(
+                color: Colors.white,
+                strokeWidth: 2.5,
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _errorCard(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Theme.of(context).cardColor,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Text(
+            'Could not load the verification. Check your internet and try again.',
+            textAlign: TextAlign.center,
+          ),
+          const SizedBox(height: 8),
+          TextButton(onPressed: _retry, child: const Text('Retry')),
+        ],
       ),
     );
   }
