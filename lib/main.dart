@@ -14,6 +14,10 @@ import 'package:webview_flutter/webview_flutter.dart';
 
 const _brandColor = Color(0xFF4995DB);
 
+// ============================================================================
+// DOMAIN MODELS: Profile and CodeSnapshot data structures
+// ============================================================================
+
 class Profile {
   const Profile({
     this.firstName = '',
@@ -22,6 +26,7 @@ class Profile {
     this.avatarUrl = '',
   });
 
+  // Parses profile data safely from Supabase response map
   factory Profile.fromMap(
     Map<String, dynamic> map, {
     String fallbackEmail = '',
@@ -49,6 +54,10 @@ class CodeSnapshot {
   final double secondsLeft;
 }
 
+// ============================================================================
+// API & NETWORK GATEWAY: Handles all Supabase RPC and Auth calls
+// ============================================================================
+
 class ApiGateway {
   ApiGateway._();
 
@@ -60,10 +69,12 @@ class ApiGateway {
 
   bool get hasSession => _client.auth.currentSession != null;
 
+  // Stream listening to real-time auth state changes
   Stream<bool> get sessionChanges => _client.auth.onAuthStateChange
       .map((state) => state.session != null)
       .distinct();
 
+  // Checks if user email is registered via database RPC
   Future<bool> isEmailRegistered(String email) async {
     final result = await _client.rpc(
       'check_email_exists',
@@ -72,6 +83,7 @@ class ApiGateway {
     return result == true;
   }
 
+  // Verifies Cloudflare Turnstile captcha token via edge function
   Future<bool> verifyCaptcha(String token) async {
     final response = await _client.functions
         .invoke('verify-authenticator-captcha', body: {'captcha_token': token})
@@ -80,6 +92,7 @@ class ApiGateway {
     return data is Map && data['valid'] == true;
   }
 
+  // Authenticates user session with Google ID token
   Future<void> signInWithGoogle(String idToken) async {
     await _client.auth.signInWithIdToken(
       provider: OAuthProvider.google,
@@ -87,12 +100,14 @@ class ApiGateway {
     );
   }
 
+  // Safely signs out from Supabase backend
   Future<void> signOut() async {
     try {
       await _client.auth.signOut();
     } catch (_) {}
   }
 
+  // Fetches current user profile details from database
   Future<Profile?> fetchProfile() async {
     final user = _client.auth.currentUser;
     if (user == null) return null;
@@ -115,6 +130,7 @@ class ApiGateway {
 
   Future<CodeSnapshot?> generateCode() => _fetchCode('generate_my_code');
 
+  // Generic helper to fetch active authenticator code snapshot
   Future<CodeSnapshot?> _fetchCode(String function) async {
     final rows = await _client.rpc(function).timeout(_timeout) as List;
     if (rows.isEmpty) return null;
@@ -127,13 +143,19 @@ class ApiGateway {
   }
 }
 
+// ============================================================================
+// LOCAL STORAGE & SESSION MANAGEMENT: SharedPreferences wrappers
+// ============================================================================
+
 class ProfileStore {
   static late SharedPreferences _prefs;
 
+  // Initializes local shared preferences instance
   static Future<void> init() async {
     _prefs = await SharedPreferences.getInstance();
   }
 
+  // Reads cached profile details from local storage
   static Profile read() {
     return Profile(
       firstName: _prefs.getString('first_name') ?? '',
@@ -143,6 +165,7 @@ class ProfileStore {
     );
   }
 
+  // Persists profile details locally
   static Future<void> write(Profile profile) async {
     await Future.wait([
       _prefs.setString('first_name', profile.firstName),
@@ -155,6 +178,7 @@ class ProfileStore {
   static Future<void> clear() => _prefs.clear();
 }
 
+// Synchronizes remote profile with local storage cache
 Future<Profile?> syncProfile() async {
   final profile = await ApiGateway.instance.fetchProfile();
   if (profile != null) await ProfileStore.write(profile);
@@ -167,6 +191,7 @@ Future<void> signOutGoogle() async {
   } catch (_) {}
 }
 
+// Clears all local sessions, cache, and authentication state
 Future<void> clearSession() async {
   final avatarUrl = ProfileStore.read().avatarUrl;
   await Future.wait([signOutGoogle(), ApiGateway.instance.signOut()]);
@@ -176,12 +201,17 @@ Future<void> clearSession() async {
   await ProfileStore.clear();
 }
 
+// Helper to navigate and replace current screen smoothly
 void replaceWith(BuildContext context, Widget screen) {
   Navigator.pushReplacement(
     context,
     CupertinoPageRoute(builder: (_) => screen),
   );
 }
+
+// ============================================================================
+// APP ENTRY POINT & THEME CONFIGURATION: Initializer and app theme setup
+// ============================================================================
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -216,6 +246,7 @@ Future<void> main() async {
   }
 }
 
+// Configures status bar and navigation bar styles based on brightness
 SystemUiOverlayStyle overlayStyleFor(Brightness brightness) {
   final iconBrightness = brightness == Brightness.light
       ? Brightness.dark
@@ -230,6 +261,7 @@ SystemUiOverlayStyle overlayStyleFor(Brightness brightness) {
   );
 }
 
+// Builds material theme configuration for light and dark modes
 ThemeData buildTheme(Brightness brightness) {
   return ThemeData(
     useMaterial3: true,
@@ -271,6 +303,10 @@ class MainApp extends StatelessWidget {
   }
 }
 
+// ============================================================================
+// LOGIN SCREEN & AUTHENTICATION FLOW: Google Sign-in and Captcha verification
+// ============================================================================
+
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
 
@@ -282,6 +318,7 @@ class _LoginScreenState extends State<LoginScreen> {
   final _gateway = ApiGateway.instance;
   bool _busy = false;
 
+  // Displays error snackbar message at bottom of screen
   void _showError(String message) {
     if (!mounted) return;
     final colors = Theme.of(context).colorScheme;
@@ -294,6 +331,7 @@ class _LoginScreenState extends State<LoginScreen> {
     );
   }
 
+  // Navigates to terms and conditions screen
   void _openTerms() {
     Navigator.push(
       context,
@@ -301,6 +339,7 @@ class _LoginScreenState extends State<LoginScreen> {
     );
   }
 
+  // Executes full secure sign-in process with captcha and Google auth
   Future<void> _signIn() async {
     if (_busy) return;
     setState(() => _busy = true);
@@ -487,6 +526,10 @@ class _LoginScreenState extends State<LoginScreen> {
     );
   }
 }
+
+// ============================================================================
+// TERMS & CONDITIONS SCREEN: Displays legal policy points and collected data
+// ============================================================================
 
 class _TermsEntry {
   const _TermsEntry(this.icon, this.title, this.text);
@@ -703,6 +746,10 @@ class _TermsSection extends StatelessWidget {
   }
 }
 
+// ============================================================================
+// CAPTCHA CHALLENGE DIALOG: Cloudflare Turnstile web view integration
+// ============================================================================
+
 class CaptchaDialog extends StatefulWidget {
   const CaptchaDialog({super.key});
 
@@ -724,6 +771,7 @@ class CaptchaDialog extends StatefulWidget {
 class _CaptchaDialogState extends State<CaptchaDialog> {
   static const String action = 'google_signin';
 
+  // Generates HTML string embedding Cloudflare Turnstile widget
   String get _page {
     final siteKey = _jsLiteral(CaptchaDialog.siteKey);
     return '''
@@ -793,6 +841,7 @@ function initCaptcha() {
       ..loadHtmlString(_page, baseUrl: CaptchaDialog.origin);
   }
 
+  // Handles messages received from WebView JavaScript channel
   void _onMessage(JavaScriptMessage message) {
     if (_done || !mounted) return;
     final data = message.message;
@@ -810,6 +859,7 @@ function initCaptcha() {
     }
   }
 
+  // Retries loading captcha web view on failure
   void _retry() {
     setState(() {
       _failed = false;
@@ -880,6 +930,10 @@ function initCaptcha() {
     );
   }
 }
+
+// ============================================================================
+// SHARED UI COMPONENTS: Reusable widgets like GoogleLogo, Avatar, etc.
+// ============================================================================
 
 class GoogleLogo extends StatelessWidget {
   const GoogleLogo({super.key, this.size = 24});
@@ -986,6 +1040,10 @@ class Avatar extends StatelessWidget {
   }
 }
 
+// ============================================================================
+// HOME SCREEN & AUTHENTICATOR CODE DASHBOARD: 2FA code generation and timer
+// ============================================================================
+
 enum _CodeState { loading, offline, idle, active }
 
 class HomeScreen extends StatefulWidget {
@@ -1057,12 +1115,14 @@ class _HomeScreenState extends State<HomeScreen>
     _loadCode();
   }
 
+  // Refreshes user profile information from backend
   Future<void> _refreshProfile() async {
     final profile = await syncProfile();
     if (profile == null || !mounted) return;
     setState(() => _profile = profile);
   }
 
+  // Periodic timer tick handler for countdown and retry scheduling
   void _onTick() {
     if (!mounted || _loggingOut) return;
 
@@ -1075,6 +1135,7 @@ class _HomeScreenState extends State<HomeScreen>
     }
   }
 
+  // Resets code state to idle waiting for user generation
   void _showIdle() {
     _clock.reset();
     setState(() {
@@ -1083,6 +1144,7 @@ class _HomeScreenState extends State<HomeScreen>
     });
   }
 
+  // Updates state to offline indicating connection loss
   void _showOffline() {
     _clock.reset();
     _retryAt = DateTime.now().add(_retryDelay);
@@ -1092,6 +1154,7 @@ class _HomeScreenState extends State<HomeScreen>
     });
   }
 
+  // Displays active verification code and syncs expiration clock
   void _showCode(CodeSnapshot snapshot, DateTime askedAt) {
     final remaining = snapshot.secondsLeft.clamp(0.0, _lifetime.toDouble());
     if (remaining == 0) {
@@ -1108,6 +1171,7 @@ class _HomeScreenState extends State<HomeScreen>
     _syncClock();
   }
 
+  // Synchronizes animation clock progress with remaining code lifetime
   void _syncClock() {
     final millisLeft = _expiresAt.difference(DateTime.now()).inMilliseconds;
     final elapsed = (_lifetime * 1000 - millisLeft) / (_lifetime * 1000);
@@ -1116,6 +1180,7 @@ class _HomeScreenState extends State<HomeScreen>
 
   bool _isCurrent(int ticket) => mounted && !_loggingOut && ticket == _ticket;
 
+  // Loads current or newly generated authenticator code from backend
   Future<void> _loadCode({bool fresh = false}) async {
     if (_loggingOut) return;
     final ticket = ++_ticket;
@@ -1133,6 +1198,7 @@ class _HomeScreenState extends State<HomeScreen>
     }
   }
 
+  // Triggers generation of a fresh authenticator code
   Future<void> _generate() async {
     if (_generating) return;
     setState(() => _generating = true);
@@ -1140,6 +1206,7 @@ class _HomeScreenState extends State<HomeScreen>
     if (mounted) setState(() => _generating = false);
   }
 
+  // Shows confirmation dialog before logging out
   Future<bool> _confirmLogout() async {
     final confirmed = await showCupertinoDialog<bool>(
       context: context,
@@ -1168,6 +1235,7 @@ class _HomeScreenState extends State<HomeScreen>
     await _leave();
   }
 
+  // Performs cleanup and navigates back to login screen on sign out
   Future<void> _leave() async {
     if (_loggingOut || !mounted) return;
     setState(() => _loggingOut = true);
@@ -1266,6 +1334,7 @@ class _HomeScreenState extends State<HomeScreen>
     );
   }
 
+  // Renders appropriate UI widget based on current code state
   Widget _codeContent(ThemeData theme) {
     final colors = theme.colorScheme;
 
@@ -1356,6 +1425,10 @@ class _HomeScreenState extends State<HomeScreen>
     }
   }
 }
+
+// ============================================================================
+// UI HELPERS: Card container and profile row widgets
+// ============================================================================
 
 class _SectionCard extends StatelessWidget {
   const _SectionCard({required this.child});
